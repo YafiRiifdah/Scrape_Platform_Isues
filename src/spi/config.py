@@ -60,6 +60,7 @@ class AnalysisConfig(BaseModel):
     per_post_model: str = "claude-haiku-5-5"
     report_model: str = "claude-opus-5-5"
     max_comments_to_llm: int = 200
+    top_replied_to_llm: int = 10  # komentar paling banyak dibalas yang dijamin ikut ke LLM
     language: str = "id"
     server_side_fallback: bool = True
 

@@ -64,3 +64,4 @@ def test_comment_defaults():
     assert c.likes is None
     assert c.is_reply is False
     assert c.parent_comment_id is None
+    assert c.replies_count is None

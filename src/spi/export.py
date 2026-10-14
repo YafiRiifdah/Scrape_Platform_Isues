@@ -70,7 +70,7 @@ def export_csv(db: Storage, out_dir: str | Path, since: Optional[datetime] = Non
                     "model": a["model"],
                 }
             )
-    comment_header = ["platform", "account", "post_id", "comment_id", "text", "created_at", "likes", "is_reply", "parent_comment_id"]
+    comment_header = ["platform", "account", "post_id", "comment_id", "text", "created_at", "likes", "replies_count", "is_reply", "parent_comment_id"]
     analysis_header = ["platform", "account", "post_id", "url", "created_at", "topics", "issue_summary", "sentiment_pro", "sentiment_kontra", "sentiment_netral", "intensity", "public_reaction_summary", "model"]
 
     return [

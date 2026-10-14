@@ -113,6 +113,7 @@ def test_fetch_comments_batches_all_posts_in_one_run_and_serves_per_post():
 
     assert [c.comment_id for c in got_a] == ["1", "2"]
     assert got_a[0].likes == 9 and got_a[0].post_id == "a" and got_a[0].is_reply is False
+    assert got_a[0].replies_count == 0
     assert got_a[0].created_at == datetime(2026, 10, 13, 10, 0, tzinfo=timezone.utc)
     assert [c.comment_id for c in got_b] == ["4"]
 
@@ -122,6 +123,14 @@ def test_fetch_comments_batches_all_posts_in_one_run_and_serves_per_post():
     assert set(payload["postURLs"]) == {url_a, url_b}
     assert payload["commentsPerPost"] == 2
     assert payload["maxRepliesPerComment"] == 0
+
+
+def test_map_comment_item_reads_reply_total():
+    from spi.scrapers.tiktok_apify import map_comment_item
+
+    item = apify_comment("1", "https://www.tiktok.com/@x/video/1")
+    item["replyCommentTotal"] = 37
+    assert map_comment_item(item, "1").replies_count == 37
 
 
 def test_comments_are_batched_even_when_posts_are_consumed_lazily():

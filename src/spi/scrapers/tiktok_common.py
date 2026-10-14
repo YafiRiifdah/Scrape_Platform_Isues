@@ -79,4 +79,5 @@ def map_comment_dict(d: dict[str, Any], post_id: str) -> Comment:
         likes=to_int(d.get("digg_count")),
         is_reply=is_reply,
         parent_comment_id=reply_id if is_reply else None,
+        replies_count=to_int(d.get("reply_comment_total")),
     )

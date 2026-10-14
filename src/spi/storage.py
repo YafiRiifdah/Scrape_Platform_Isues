@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS comments (
     likes INTEGER,
     is_reply INTEGER NOT NULL DEFAULT 0,
     parent_comment_id TEXT,
+    replies_count INTEGER,
     scraped_at TEXT NOT NULL,
     PRIMARY KEY (platform, comment_id)
 );
@@ -108,7 +109,14 @@ class Storage:
     # ---- lifecycle -------------------------------------------------------
     def init_db(self) -> None:
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Tambahkan kolom baru ke database lama tanpa menghapus data."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(comments)")}
+        if "replies_count" not in cols:
+            self.conn.execute("ALTER TABLE comments ADD COLUMN replies_count INTEGER")
 
     def close(self) -> None:
         self.conn.close()
@@ -185,12 +193,14 @@ class Storage:
             self.conn.execute(
                 """
                 INSERT INTO comments (platform, comment_id, post_id, text, created_at, likes,
-                                      is_reply, parent_comment_id, scraped_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      is_reply, parent_comment_id, replies_count, scraped_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, comment_id) DO UPDATE SET
                     text=excluded.text, created_at=COALESCE(excluded.created_at, comments.created_at),
                     likes=excluded.likes, is_reply=excluded.is_reply,
-                    parent_comment_id=excluded.parent_comment_id, scraped_at=excluded.scraped_at
+                    parent_comment_id=excluded.parent_comment_id,
+                    replies_count=COALESCE(excluded.replies_count, comments.replies_count),
+                    scraped_at=excluded.scraped_at
                 """,
                 (
                     c.platform,
@@ -201,6 +211,7 @@ class Storage:
                     c.likes,
                     1 if c.is_reply else 0,
                     c.parent_comment_id,
+                    c.replies_count,
                     _now(),
                 ),
             )
@@ -219,17 +230,40 @@ class Storage:
             likes=row["likes"],
             is_reply=bool(row["is_reply"]),
             parent_comment_id=row["parent_comment_id"],
+            replies_count=row["replies_eff"] if "replies_eff" in row.keys() else row["replies_count"],
         )
+
+    # replies_count tersimpan (TikTok/Apify) atau dihitung dari balasan tersimpan (Instagram)
+    _COMMENT_SELECT = """
+        SELECT c.*, COALESCE(c.replies_count,
+            (SELECT COUNT(*) FROM comments r WHERE r.platform = c.platform AND r.parent_comment_id = c.comment_id)
+        ) AS replies_eff
+        FROM comments c WHERE c.platform = ? AND c.post_id = ?
+    """
 
     def get_comments_for_post(self, platform: str, post_id: str, limit: int) -> list[Comment]:
         rows = self.conn.execute(
-            """
-            SELECT * FROM comments WHERE platform = ? AND post_id = ?
-            ORDER BY COALESCE(likes, 0) DESC, created_at ASC LIMIT ?
-            """,
+            self._COMMENT_SELECT + " ORDER BY COALESCE(c.likes, 0) DESC, c.created_at ASC LIMIT ?",
             (platform, post_id, limit),
         )
         return [self._row_to_comment(r) for r in rows]
+
+    def get_comments_for_llm(self, platform: str, post_id: str, limit: int, top_replied: int = 10) -> list[Comment]:
+        """Komentar teratas berdasarkan like, dengan jaminan komentar paling banyak dibalas ikut serta."""
+        replied = [
+            self._row_to_comment(r)
+            for r in self.conn.execute(
+                self._COMMENT_SELECT + " AND c.is_reply = 0 ORDER BY replies_eff DESC, COALESCE(c.likes, 0) DESC LIMIT ?",
+                (platform, post_id, min(top_replied, limit)),
+            )
+            if r["replies_eff"]
+        ]
+        chosen = {c.comment_id: c for c in replied}
+        for c in self.get_comments_for_post(platform, post_id, limit):
+            if len(chosen) >= limit:
+                break
+            chosen.setdefault(c.comment_id, c)
+        return sorted(chosen.values(), key=lambda c: (c.likes or 0, c.replies_count or 0), reverse=True)
 
     def count_comments(self, platform: str, post_id: str) -> int:
         row = self.conn.execute(

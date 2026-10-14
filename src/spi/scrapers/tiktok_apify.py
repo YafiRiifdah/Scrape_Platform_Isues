@@ -104,6 +104,7 @@ def map_comment_item(item: dict[str, Any], post_id: str) -> Comment:
         likes=to_int(item.get("diggCount")),
         is_reply=bool(parent),
         parent_comment_id=str(parent) if parent else None,
+        replies_count=to_int(item.get("replyCommentTotal")),
     )
 
 

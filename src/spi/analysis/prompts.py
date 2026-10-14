@@ -21,6 +21,9 @@ Pedoman:
 - public_reaction_summary: 2-3 kalimat tentang pola reaksi netizen, sebutkan argumen dominan.
 - representative_comments: maksimal 3 kutipan komentar apa adanya (boleh dipotong) yang paling mewakili.
 - intensity: "tinggi" bila komentar banyak berdebat/marah, "rendah" bila datar atau sedikit.
+- discussion_triggers: setiap komentar diberi label [N like, M balasan]. Pilih 0-2 komentar dengan
+  balasan terbanyak (M terbesar, minimal 1) yang paling memicu perdebatan; salin angka balasannya
+  apa adanya dan jelaskan singkat kenapa komentar itu memancing diskusi. Kosongkan bila semua M = 0.
 Jika komentar belum ada, nilai sentiment netral 1.0, intensity "rendah", dan reaksi publik
 ditulis "Belum ada komentar yang bisa dianalisis"."""
 
@@ -41,6 +44,8 @@ akun yang paling mendorong isu, dan rujukan post (sebutkan URL dari data).
 Bandingkan bagaimana media yang berbeda membingkai isu yang sama.
 ## 4. Reaksi Publik
 Pola sentimen dominan per isu, argumen pro/kontra utama, kutipan komentar representatif.
+Sertakan sub-bagian "Komentar yang paling memicu diskusi": untuk tiap isu, komentar dengan balasan
+terbanyak (dari field discussion_triggers) beserta jumlah balasan dan alasan ia memancing perdebatan.
 ## 5. Isu yang Naik dan Meredup
 Berdasarkan tanggal post dan engagement dalam rentang waktu.
 ## 6. Metodologi dan Keterbatasan
@@ -80,7 +85,7 @@ def build_post_user_message(post: Post, comments: Iterable[Comment], max_chars: 
             if len(text) > max_chars:
                 text = text[:max_chars]
             prefix = "  ↳ " if c.is_reply else "- "
-            lines.append(f"{prefix}[{c.likes or 0} like] {text}")
+            lines.append(f"{prefix}[{c.likes or 0} like, {c.replies_count or 0} balasan] {text}")
     return "\n".join(lines)
 
 

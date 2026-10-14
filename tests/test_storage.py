@@ -49,6 +49,61 @@ def test_get_comments_for_post_orders_by_likes_desc_and_limits(db):
     assert [c.comment_id for c in comments] == ["high", "mid"]
 
 
+def test_replies_count_is_stored_or_derived_from_child_rows(db):
+    db.upsert_post(make_post())
+    db.upsert_comments(
+        [
+            make_comment(comment_id="tt", likes=1, replies_count=42),  # TikTok: angka dari Apify
+            make_comment(comment_id="ig", likes=1),  # Instagram: dihitung dari balasan tersimpan
+            make_comment(comment_id="ig-r1", likes=0, is_reply=True, parent_comment_id="ig"),
+            make_comment(comment_id="ig-r2", likes=0, is_reply=True, parent_comment_id="ig"),
+            make_comment(comment_id="lonely", likes=1),
+        ]
+    )
+
+    by_id = {c.comment_id: c for c in db.get_comments_for_post("instagram", "ABC123", limit=10)}
+    assert by_id["tt"].replies_count == 42
+    assert by_id["ig"].replies_count == 2
+    assert by_id["lonely"].replies_count == 0
+
+
+def test_get_comments_for_llm_guarantees_most_replied_even_with_few_likes(db):
+    db.upsert_post(make_post())
+    comments = [make_comment(comment_id=f"like{i}", likes=100 - i) for i in range(5)]
+    comments.append(make_comment(comment_id="viral_reply", likes=0, replies_count=500))
+    db.upsert_comments(comments)
+
+    got = db.get_comments_for_llm("instagram", "ABC123", limit=3, top_replied=1)
+
+    ids = [c.comment_id for c in got]
+    assert len(ids) == 3
+    assert "viral_reply" in ids
+    assert ids[0] == "like0"  # sisanya tetap urut like
+
+
+def test_init_db_adds_replies_count_to_existing_database(tmp_path):
+    import sqlite3
+
+    from spi.storage import Storage
+
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE comments (platform TEXT, comment_id TEXT, post_id TEXT, text TEXT, created_at TEXT,
+            likes INTEGER, is_reply INTEGER, parent_comment_id TEXT, scraped_at TEXT, PRIMARY KEY (platform, comment_id));
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Storage(path)
+    db.init_db()
+    cols = {r[1] for r in db.conn.execute("PRAGMA table_info(comments)")}
+    db.close()
+    assert "replies_count" in cols
+
+
 def test_comment_counts_per_post(db):
     db.upsert_post(make_post(post_id="p1"))
     db.upsert_post(make_post(post_id="p2"))

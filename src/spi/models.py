@@ -50,6 +50,7 @@ class Comment(BaseModel):
     likes: Optional[int] = None
     is_reply: bool = False
     parent_comment_id: Optional[str] = None
+    replies_count: Optional[int] = None  # jumlah balasan; None = tidak diketahui (dihitung dari balasan tersimpan)
 
     @field_validator("created_at")
     @classmethod

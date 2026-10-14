@@ -72,7 +72,7 @@ def analyze_pending(
     stats: dict[str, Any] = {"analyzed": 0, "skipped": 0, "failed": 0, "tokens_in": 0, "tokens_out": 0, "errors": []}
     posts = db.get_posts_since(since)
     for idx, post in enumerate(posts, start=1):
-        comments = db.get_comments_for_post(post.platform, post.post_id, cfg.max_comments_to_llm)
+        comments = db.get_comments_for_llm(post.platform, post.post_id, cfg.max_comments_to_llm, top_replied=cfg.top_replied_to_llm)
         h = prompts.input_hash(post, comments)
         existing = db.get_analysis(post.platform, post.post_id)
         if existing and existing["input_hash"] == h:

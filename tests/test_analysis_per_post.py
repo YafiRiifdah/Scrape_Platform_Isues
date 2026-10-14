@@ -53,7 +53,39 @@ def test_build_post_message_contains_metadata_caption_and_truncated_comments():
     assert "instagram" in msg and "kompascom" in msg and "Caption uji" in msg
     assert "pendek" in msg
     assert "a" * 300 in msg and "a" * 301 not in msg
-    assert "[9 like]" in msg
+    assert "[9 like, 0 balasan]" in msg
+
+
+def test_build_post_message_shows_reply_counts():
+    post = make_post()
+    msg = prompts.build_post_user_message(post, [make_comment(comment_id="1", text="ramai", likes=3, replies_count=58)])
+    assert "[3 like, 58 balasan]" in msg
+
+
+def test_post_analysis_accepts_discussion_triggers():
+    a = PostAnalysis.model_validate(
+        dict(VALID_ANALYSIS, discussion_triggers=[{"text": "petani makin susah", "replies_count": 58, "why": "memicu debat impor"}])
+    )
+    assert a.discussion_triggers[0].replies_count == 58
+
+
+def test_post_analysis_discussion_triggers_default_empty_and_max_two():
+    assert PostAnalysis.model_validate(VALID_ANALYSIS).discussion_triggers == []
+    with pytest.raises(ValidationError):
+        PostAnalysis.model_validate(dict(VALID_ANALYSIS, discussion_triggers=[{"text": "x", "replies_count": 1, "why": "y"}] * 3))
+
+
+def test_analyze_pending_uses_llm_selection_with_top_replied(db):
+    db.upsert_post(make_post(post_id="p0"))
+    comments = [make_comment(post_id="p0", comment_id=f"l{i}", likes=50 - i) for i in range(5)]
+    comments.append(make_comment(post_id="p0", comment_id="hot", likes=0, replies_count=99))
+    db.upsert_comments(comments)
+    client = fake_client()
+
+    analyze_pending(db, AnalysisConfig(max_comments_to_llm=3), client, SINCE, sleep=lambda s: None)
+
+    body = client.messages.calls[0]["messages"][0]["content"]
+    assert "99 balasan" in body
 
 
 def test_input_hash_changes_when_comments_change():

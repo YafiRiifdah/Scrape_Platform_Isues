@@ -15,6 +15,12 @@ class RepresentativeComment(BaseModel):
     stance: Stance = Field(description="Sikap komentar terhadap isi postingan")
 
 
+class DiscussionTrigger(BaseModel):
+    text: str = Field(description="Kutipan komentar yang memicu diskusi, maksimal 200 karakter")
+    replies_count: int = Field(description="Jumlah balasan komentar tersebut, dari data")
+    why: str = Field(description="Satu kalimat: kenapa komentar ini memicu perdebatan")
+
+
 class PostAnalysis(BaseModel):
     topics: list[str] = Field(
         min_length=1,
@@ -31,6 +37,11 @@ class PostAnalysis(BaseModel):
     )
     intensity: Literal["rendah", "sedang", "tinggi"] = Field(
         description="Seberapa panas perdebatan di komentar"
+    )
+    discussion_triggers: list[DiscussionTrigger] = Field(
+        default_factory=list,
+        max_length=2,
+        description="0-2 komentar dengan balasan terbanyak yang paling memicu diskusi; kosong bila tidak ada balasan",
     )
 
     @field_validator("sentiment")
