@@ -28,6 +28,8 @@ def make_post(**overrides) -> Post:
         comments_count=340,
     )
     data.update(overrides)
+    if "url" not in overrides:
+        data["url"] = f"https://www.instagram.com/p/{data['post_id']}/"
     return Post(**data)
 
 
