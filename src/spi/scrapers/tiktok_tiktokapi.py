@@ -104,15 +104,15 @@ class TikTokApiScraper:
     def _ensure_api(self) -> Any:
         if self._api is not None:
             return self._api
-        ms_token = self.settings.get("env", {}).get("TIKTOK_MS_TOKEN")
+        ms_token = self.settings.get("env", {}).get("TIKTOK_MS_TOKEN") or None
         if not ms_token:
-            raise ScrapeBlocked("TIKTOK_MS_TOKEN belum diisi di .env. " + MS_TOKEN_HINT)
+            log.warning("TIKTOK_MS_TOKEN kosong; mencoba tanpa token. Bila respons kosong, isi token. %s", MS_TOKEN_HINT)
 
         async def _open():
             api = self._api_factory()
             await api.__aenter__()
             await api.create_sessions(
-                ms_tokens=[ms_token],
+                ms_tokens=[ms_token] if ms_token else None,
                 num_sessions=1,
                 sleep_after=3,
                 browser="chromium",

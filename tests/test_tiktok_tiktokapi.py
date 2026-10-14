@@ -157,10 +157,11 @@ def test_not_found_maps_to_account_not_found():
         list(scraper.fetch_posts("kompascom", None, 10))
 
 
-def test_missing_ms_token_gives_actionable_error():
-    scraper, _ = make_scraper(ms_token=None)
-    with pytest.raises(ScrapeBlocked, match="TIKTOK_MS_TOKEN"):
-        list(scraper.fetch_posts("kompascom", None, 10))
+def test_missing_ms_token_proceeds_without_token():
+    scraper, api = make_scraper([tt_video("a", 1)], ms_token=None)
+    got = list(scraper.fetch_posts("kompascom", None, 10))
+    assert [p.post_id for p in got] == ["a"]
+    assert api.create_kwargs["ms_tokens"] is None
 
 
 def test_close_closes_api():
