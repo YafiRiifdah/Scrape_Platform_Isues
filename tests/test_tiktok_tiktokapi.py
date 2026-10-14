@@ -151,6 +151,12 @@ def test_captcha_is_blocked_without_retry():
     assert scraper.attempts_made == 1
 
 
+def test_library_parse_error_is_reported_as_blocked():
+    scraper, _ = make_scraper(raise_exc=KeyError("id"))
+    with pytest.raises(ScrapeBlocked, match="tidak lengkap"):
+        list(scraper.fetch_posts("kompascom", None, 10))
+
+
 def test_not_found_maps_to_account_not_found():
     scraper, _ = make_scraper(raise_exc=ttx.NotFoundException(None, "nf"))
     with pytest.raises(AccountNotFound):

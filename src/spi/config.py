@@ -50,6 +50,7 @@ class ScrapeConfig(BaseModel):
     delay_between_accounts: DelayRange = (30.0, 90.0)
     older_posts_tolerance: int = 3
     rate_limit_sleep_minutes: float = 15
+    captcha_wait_seconds: float = 180
 
     _v1 = field_validator("delay_between_requests")(_check_range)
     _v2 = field_validator("delay_between_accounts")(_check_range)
@@ -67,6 +68,7 @@ class StorageConfig(BaseModel):
     db_path: str = "data/spi.sqlite"
     reports_dir: str = "reports"
     ig_session_file: str = "data/ig_session"
+    browser_profile_dir: str = "data/browser_profile"
 
 
 class AppConfig(BaseModel):

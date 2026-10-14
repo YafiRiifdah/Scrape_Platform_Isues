@@ -55,8 +55,13 @@ TikTok tidak perlu login, hanya cookie `msToken`:
 3. Tempel ke `TIKTOK_MS_TOKEN` di `.env`.
 
 Token kedaluwarsa setelah beberapa jam/hari; kalau scraper TikTok mulai mengembalikan respons
-kosong, ambil token baru. Saat scraping, sebuah jendela Chromium akan terbuka (bukan headless,
-supaya tidak terdeteksi bot). Biarkan saja.
+kosong, ambil token baru. Token bersifat opsional: tanpa token scraper tetap mencoba, hanya lebih
+mudah diblokir.
+
+Saat scraping, sebuah jendela browser akan terbuka (bukan headless, supaya tidak terdeteksi bot).
+Biarkan saja. Scraper otomatis memakai Edge atau Chrome yang terpasang karena Chromium bawaan
+Playwright sering diblokir Windows saat dibuka berjendela (`spawn UNKNOWN`). Kalau ingin browser
+lain, isi `SPI_BROWSER_PATH` di `.env`.
 
 ## 3. Scraping
 

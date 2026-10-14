@@ -10,8 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable, Iterator, Optional
 
 from TikTokApi import TikTokApi
@@ -19,6 +18,7 @@ from TikTokApi import exceptions as ttx
 
 from spi.models import Comment, Post
 from spi.scrapers.base import AccountNotFound, ScrapeBlocked, ScraperError, should_stop
+from spi.scrapers.tiktok_common import detect_system_browser, map_comment_dict, map_item
 
 log = logging.getLogger("spi.scrapers.tiktok")
 
@@ -29,74 +29,19 @@ MS_TOKEN_HINT = (
 )
 
 
-SYSTEM_BROWSER_CANDIDATES = (
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    "/usr/bin/google-chrome",
-    "/usr/bin/microsoft-edge",
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-)
-
-
-def detect_system_browser() -> Optional[str]:
-    """Cari Edge/Chrome terpasang. Chromium bawaan Playwright kadang diblokir Windows
-    (gagal 'spawn UNKNOWN' saat berjendela), sedangkan browser sistem lolos."""
-    for candidate in SYSTEM_BROWSER_CANDIDATES:
-        if Path(candidate).exists():
-            return candidate
-    return None
-
-
-def _int(value: Any) -> Optional[int]:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _epoch_utc(value: Any) -> Optional[datetime]:
-    ts = _int(value)
-    return datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
-
-
 def map_video(video: Any, account: str) -> Post:
-    """Petakan TikTokApi Video (lewat `as_dict`) ke model Post. Semua akses pakai .get()."""
-    d: dict[str, Any] = video.as_dict or {}
-    stats = d.get("statsV2") or d.get("stats") or {}
-    vid = str(d.get("id") or video.id)
-    created = _epoch_utc(d.get("createTime")) or datetime.now(timezone.utc)
-    return Post(
-        platform="tiktok",
-        account=account,
-        post_id=vid,
-        url=f"https://www.tiktok.com/@{account}/video/{vid}",
-        created_at=created,
-        caption=d.get("desc") or "",
-        hashtags=[str(c.get("title", "")).lower() for c in d.get("challenges") or [] if c.get("title")],
-        media_type="video",
-        likes=_int(stats.get("diggCount")),
-        comments_count=_int(stats.get("commentCount")),
-        shares=_int(stats.get("shareCount")),
-        views=_int(stats.get("playCount")),
-    )
+    """Petakan TikTokApi Video (lewat `as_dict`) ke model Post."""
+    d = dict(video.as_dict or {})
+    d.setdefault("id", getattr(video, "id", None))
+    return map_item(d, account)
 
 
 def map_comment(comment: Any, post_id: str) -> Comment:
-    d: dict[str, Any] = getattr(comment, "as_dict", None) or {}
-    reply_id = str(d.get("reply_id") or "0")
-    is_reply = reply_id not in ("0", "")
-    return Comment(
-        platform="tiktok",
-        post_id=post_id,
-        comment_id=str(d.get("cid") or comment.id),
-        text=d.get("text") if d.get("text") is not None else (comment.text or ""),
-        created_at=_epoch_utc(d.get("create_time")),
-        likes=_int(d.get("digg_count", getattr(comment, "likes_count", None))),
-        is_reply=is_reply,
-        parent_comment_id=reply_id if is_reply else None,
-    )
+    d = dict(getattr(comment, "as_dict", None) or {})
+    d.setdefault("cid", getattr(comment, "id", None))
+    d.setdefault("text", getattr(comment, "text", None))
+    d.setdefault("digg_count", getattr(comment, "likes_count", None))
+    return map_comment_dict(d, post_id)
 
 
 class TikTokApiScraper:
@@ -172,6 +117,11 @@ class TikTokApiScraper:
                 raise ScrapeBlocked(f"TikTok menampilkan CAPTCHA ({e}). " + MS_TOKEN_HINT) from e
             except ttx.NotFoundException as e:
                 raise AccountNotFound(str(e)) from e
+            except (KeyError, IndexError, TypeError) as e:
+                raise ScrapeBlocked(
+                    f"TikTok mengirim data tidak lengkap ({type(e).__name__}: {e}); biasanya tanda pemblokiran bot. "
+                    "Gunakan adapter 'tiktok_playwright' di config.yaml. " + MS_TOKEN_HINT
+                ) from e
             except (ttx.EmptyResponseException, ttx.InvalidResponseException, ttx.InvalidJSONException) as e:
                 if attempt == len(RETRY_DELAYS):
                     raise ScrapeBlocked(
