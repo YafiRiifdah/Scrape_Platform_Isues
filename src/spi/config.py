@@ -1,0 +1,82 @@
+"""Konfigurasi aplikasi: daftar akun target dan parameter scraping/analisis."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import yaml
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from spi.models import Platform
+
+DEFAULT_ADAPTERS: dict[str, str] = {
+    "instagram": "instaloader",
+    "tiktok": "tiktokapi",
+}
+
+DelayRange = tuple[float, float]
+
+
+def _check_range(value: DelayRange) -> DelayRange:
+    low, high = value
+    if low < 0 or high < low:
+        raise ValueError("rentang jeda harus [min, max] dengan min >= 0 dan max >= min")
+    return (float(low), float(high))
+
+
+class AccountConfig(BaseModel):
+    platform: Platform
+    username: str
+    label: str
+    adapter: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _default_adapter(self) -> "AccountConfig":
+        if self.adapter is None:
+            self.adapter = DEFAULT_ADAPTERS[self.platform]
+        return self
+
+    @property
+    def key(self) -> str:
+        return f"{self.platform}:{self.username}"
+
+
+class ScrapeConfig(BaseModel):
+    days: int = 7
+    max_comments_per_post: int = 200
+    max_posts_per_account: int = 100
+    delay_between_requests: DelayRange = (2.0, 6.0)
+    delay_between_accounts: DelayRange = (30.0, 90.0)
+    older_posts_tolerance: int = 3
+    rate_limit_sleep_minutes: float = 15
+
+    _v1 = field_validator("delay_between_requests")(_check_range)
+    _v2 = field_validator("delay_between_accounts")(_check_range)
+
+
+class AnalysisConfig(BaseModel):
+    per_post_model: str = "claude-haiku-5-5"
+    report_model: str = "claude-opus-5-5"
+    max_comments_to_llm: int = 200
+    language: str = "id"
+    server_side_fallback: bool = True
+
+
+class StorageConfig(BaseModel):
+    db_path: str = "data/spi.sqlite"
+    reports_dir: str = "reports"
+    ig_session_file: str = "data/ig_session"
+
+
+class AppConfig(BaseModel):
+    accounts: list[AccountConfig] = Field(min_length=1)
+    scrape: ScrapeConfig = Field(default_factory=ScrapeConfig)
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+
+
+def load_config(path: str | Path) -> AppConfig:
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    return AppConfig.model_validate(data)

@@ -1,0 +1,43 @@
+# Salin ke config.yaml lalu sesuaikan daftar akun.
+
+accounts:
+  - platform: instagram
+    username: kompascom
+    label: Kompas.com
+  - platform: instagram
+    username: detikcom
+    label: detikcom
+  - platform: instagram
+    username: narasinewsroom
+    label: Narasi
+  - platform: tiktok
+    username: kompascom
+    label: Kompas.com
+  - platform: tiktok
+    username: detikcom
+    label: detikcom
+  # adapter opsional per akun: instaloader | instagram_playwright | tiktokapi | tiktok_playwright
+  # - platform: instagram
+  #   username: tempodotco
+  #   label: Tempo
+  #   adapter: instagram_playwright
+
+scrape:
+  days: 7
+  max_comments_per_post: 200
+  max_posts_per_account: 100
+  delay_between_requests: [2, 6]      # detik, acak di antara dua angka
+  delay_between_accounts: [30, 90]
+  older_posts_tolerance: 3            # post pinned yang lebih tua sebelum berhenti
+  rate_limit_sleep_minutes: 15
+
+analysis:
+  per_post_model: claude-haiku-5-5
+  report_model: claude-opus-5-5
+  max_comments_to_llm: 200
+  language: id
+  server_side_fallback: true
+
+storage:
+  db_path: data/spi.sqlite
+  reports_dir: reports

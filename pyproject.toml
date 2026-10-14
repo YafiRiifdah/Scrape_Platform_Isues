@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spi"
+version = "0.1.0"
+description = "Scrape Platform Issues: observasi isu hangat dari akun media besar di Instagram dan TikTok"
+requires-python = ">=3.11"
+dependencies = [
+    "instaloader==4.15.4",
+    "TikTokApi==7.3.3",
+    "playwright==1.64.0",
+    "anthropic==1.13.0",
+    "pydantic==2.14.1",
+    "typer==0.27.3",
+    "pyyaml==6.0.3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+spi = "spi.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
