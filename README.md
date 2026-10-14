@@ -96,6 +96,16 @@ spi report --skip-analysis   # langsung tahap 2, pakai analisis per post yang su
 - **Tahap 2** (`claude-opus-5-5`): laporan Markdown `reports/YYYY-MM-DD_HHMM_isu-hangat.md`
   berisi ringkasan eksekutif, 5-10 isu terhangat, perbedaan framing antar media, reaksi publik,
   isu naik/meredup, metodologi, plus lampiran tabel post teratas per akun (dibuat dari database).
+- **Penyedia LLM bisa diganti** lewat `analysis.provider` di `config.yaml`:
+  - `anthropic` (default): Claude, berbayar per token, kualitas terbaik. Butuh `ANTHROPIC_API_KEY`.
+  - `openai_compatible`: endpoint berformat OpenAI, cocok untuk tier gratis **Gemini**
+    (`https://generativelanguage.googleapis.com/v1beta/openai/`, key dari https://aistudio.google.com/apikey),
+    **Groq** (`https://api.groq.com/openai/v1`), **OpenRouter**, atau **Ollama** lokal
+    (`http://localhost:11434/v1`, tanpa key). Key diambil dari variabel `.env` yang namanya diatur
+    `analysis.api_key_env` (default `LLM_API_KEY`). Atur `request_delay_seconds` (misalnya 4) agar tidak
+    kena batas permintaan tier gratis. Contoh lengkap ada di `config.example.yaml`. Catatan: model gratis
+    kadang menghasilkan JSON yang tidak valid; scraper mengulang sekali dengan umpan balik, dan post yang
+    tetap gagal dicatat lalu dilewati.
 - Fallback server-side Claude aktif secara default (`analysis.server_side_fallback`): bila model
   utama menolak suatu konten, API otomatis mengulang dengan model cadangan. Matikan di config bila
   tidak diinginkan.

@@ -33,11 +33,27 @@ scrape:
   rate_limit_sleep_minutes: 15
 
 analysis:
+  # Pilihan 1 (default): Claude lewat API Anthropic, berbayar per token (±$0,35-1,30 per laporan).
+  provider: anthropic
   per_post_model: claude-haiku-5-5
   report_model: claude-opus-5-5
-  max_comments_to_llm: 200
-  language: id
   server_side_fallback: true
+
+  # Pilihan 2: penyedia berformat OpenAI-compatible, misalnya tier gratis Gemini/Groq atau Ollama lokal.
+  # Hapus tanda # di bawah dan isi LLM_API_KEY di .env (Ollama tidak perlu key).
+  # provider: openai_compatible
+  # base_url: https://generativelanguage.googleapis.com/v1beta/openai/   # Gemini
+  # # base_url: https://api.groq.com/openai/v1                           # Groq
+  # # base_url: https://openrouter.ai/api/v1                             # OpenRouter
+  # # base_url: http://localhost:11434/v1                                # Ollama lokal
+  # api_key_env: LLM_API_KEY
+  # per_post_model: gemini-2.5-flash
+  # report_model: gemini-2.5-flash
+  # request_delay_seconds: 4        # jeda antar panggilan agar tidak kena batas tier gratis
+
+  max_comments_to_llm: 200
+  top_replied_to_llm: 10
+  language: id
 
 storage:
   db_path: data/spi.sqlite
