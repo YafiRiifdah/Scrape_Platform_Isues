@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -57,6 +57,10 @@ class ScrapeConfig(BaseModel):
 
 
 class AnalysisConfig(BaseModel):
+    provider: Literal["anthropic", "openai_compatible"] = "anthropic"
+    base_url: Optional[str] = None  # hanya untuk openai_compatible, mis. Gemini/Groq/OpenRouter/Ollama
+    api_key_env: str = "LLM_API_KEY"  # nama variabel .env yang menyimpan key penyedia openai_compatible
+    request_delay_seconds: float = 0.0  # jeda antar panggilan, berguna untuk tier gratis
     per_post_model: str = "claude-haiku-5-5"
     report_model: str = "claude-opus-5-5"
     max_comments_to_llm: int = 200

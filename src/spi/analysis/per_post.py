@@ -1,15 +1,13 @@
-"""Tahap 1: analisis per post dengan Claude Haiku 5.5 dan structured output."""
+"""Tahap 1: analisis per post dengan structured output (penyedia LLM bisa Claude atau OpenAI-compatible)."""
 
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-import anthropic
-
 from spi.analysis import prompts
+from spi.analysis.llm import LLMError, LLMResult, Provider
 from spi.analysis.schemas import PostAnalysis
 from spi.config import AnalysisConfig
 from spi.models import Post
@@ -17,55 +15,25 @@ from spi.storage import Storage
 
 log = logging.getLogger("spi.analysis.per_post")
 
-MAX_RATE_LIMIT_RETRIES = 5
+PER_POST_MAX_TOKENS = 2048
 
 
-def _system_blocks() -> list[dict[str, Any]]:
-    return [{"type": "text", "text": prompts.SYSTEM_PER_POST, "cache_control": {"type": "ephemeral"}}]
-
-
-def _call_with_retry(client: Any, sleep: Callable[[float], None], **kwargs) -> Any:
-    """Panggil messages.parse; 429 dan 5xx dicoba ulang, 4xx lain langsung dilempar."""
-    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
-        try:
-            return client.messages.parse(**kwargs)
-        except anthropic.RateLimitError as e:
-            wait = float(e.response.headers.get("retry-after", "30") or 30)
-            log.warning("rate limit Claude, menunggu %.0f detik", wait)
-            sleep(wait)
-        except anthropic.APIStatusError as e:
-            if e.status_code >= 500 and attempt < MAX_RATE_LIMIT_RETRIES:
-                log.warning("server error %s, coba lagi", e.status_code)
-                sleep(5.0)
-                continue
-            raise
-    raise RuntimeError("gagal setelah beberapa kali rate limit")
-
-
-def analyze_post(client: Any, cfg: AnalysisConfig, post: Post, comments: list, sleep: Callable[[float], None]) -> tuple[Optional[PostAnalysis], Any, Optional[str]]:
-    """Mengembalikan (analysis | None, usage, error | None)."""
-    response = _call_with_retry(
-        client,
-        sleep,
+def analyze_post(provider: Provider, cfg: AnalysisConfig, post: Post, comments: list) -> LLMResult:
+    """Analisis satu post. `result.parsed` berisi PostAnalysis, atau `result.refusal` berisi alasan gagal."""
+    return provider.structured(
         model=cfg.per_post_model,
-        max_tokens=2048,
-        output_config={"effort": "low"},
-        system=_system_blocks(),
-        messages=[{"role": "user", "content": prompts.build_post_user_message(post, comments)}],
-        output_format=PostAnalysis,
+        system=prompts.SYSTEM_PER_POST,
+        user=prompts.build_post_user_message(post, comments),
+        schema=PostAnalysis,
+        max_tokens=PER_POST_MAX_TOKENS,
     )
-    if response.stop_reason == "refusal" or response.parsed_output is None:
-        detail = getattr(getattr(response, "stop_details", None), "category", None)
-        return None, response.usage, f"refusal ({detail})" if response.stop_reason == "refusal" else "output kosong"
-    return response.parsed_output, response.usage, None
 
 
 def analyze_pending(
     db: Storage,
     cfg: AnalysisConfig,
-    client: Any,
+    provider: Provider,
     since: datetime,
-    sleep: Callable[[float], None] = time.sleep,
     progress: Optional[Callable[[int, int, Post], None]] = None,
 ) -> dict[str, Any]:
     """Analisis semua post sejak `since` yang belum dianalisis atau datanya berubah."""
@@ -81,27 +49,24 @@ def analyze_pending(
         if progress:
             progress(idx, len(posts), post)
         try:
-            analysis, usage, error = analyze_post(client, cfg, post, comments, sleep)
-        except anthropic.APIConnectionError as e:
-            analysis, usage, error = None, None, f"koneksi: {e}"
-        except anthropic.APIStatusError as e:
-            analysis, usage, error = None, None, f"API {e.status_code}: {e.message}"
-        if usage is not None:
-            stats["tokens_in"] += usage.input_tokens or 0
-            stats["tokens_out"] += usage.output_tokens or 0
-        if analysis is None:
+            result = analyze_post(provider, cfg, post, comments)
+        except LLMError as e:
+            result = LLMResult(model=cfg.per_post_model, refusal=str(e))
+        stats["tokens_in"] += result.tokens_in
+        stats["tokens_out"] += result.tokens_out
+        if result.parsed is None:
             stats["failed"] += 1
-            stats["errors"].append(f"{post.platform}:{post.post_id}: {error}")
-            log.error("analisis %s:%s gagal: %s", post.platform, post.post_id, error)
+            stats["errors"].append(f"{post.platform}:{post.post_id}: {result.refusal}")
+            log.error("analisis %s:%s gagal: %s", post.platform, post.post_id, result.refusal)
             continue
         db.save_analysis(
             post.platform,
             post.post_id,
-            model=cfg.per_post_model,
-            analysis=analysis.model_dump(),
+            model=result.model or cfg.per_post_model,
+            analysis=result.parsed.model_dump(),
             input_hash=h,
-            tokens_in=usage.input_tokens,
-            tokens_out=usage.output_tokens,
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
         )
         stats["analyzed"] += 1
     return stats

@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from spi.analysis import prompts
+from spi.analysis.llm import AnthropicProvider
 from spi.analysis.per_post import analyze_pending
 from spi.analysis.schemas import PostAnalysis
 from spi.config import AnalysisConfig
@@ -82,7 +83,7 @@ def test_analyze_pending_uses_llm_selection_with_top_replied(db):
     db.upsert_comments(comments)
     client = fake_client()
 
-    analyze_pending(db, AnalysisConfig(max_comments_to_llm=3), client, SINCE, sleep=lambda s: None)
+    run(db, AnalysisConfig(max_comments_to_llm=3), client)
 
     body = client.messages.calls[0]["messages"][0]["content"]
     assert "99 balasan" in body
@@ -132,6 +133,10 @@ def fake_client(script=()):
     return SimpleNamespace(messages=FakeMessages(script))
 
 
+def run(db, cfg, client, sleep=lambda s: None):
+    return analyze_pending(db, cfg, AnthropicProvider(client, sleep=sleep), SINCE)
+
+
 def seed(db, n=2):
     for i in range(n):
         db.upsert_post(make_post(post_id=f"p{i}"))
@@ -142,7 +147,7 @@ def test_analyze_pending_saves_analysis_and_tokens(db):
     seed(db, 2)
     client = fake_client()
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
 
     assert stats["analyzed"] == 2 and stats["failed"] == 0
     assert stats["tokens_in"] == 200 and stats["tokens_out"] == 80
@@ -159,9 +164,9 @@ def test_analyze_pending_saves_analysis_and_tokens(db):
 def test_analyze_pending_skips_posts_with_unchanged_hash(db):
     seed(db, 1)
     client = fake_client()
-    analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    run(db, AnalysisConfig(), client)
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
 
     assert stats["analyzed"] == 0 and stats["skipped"] == 1
     assert len(client.messages.calls) == 1
@@ -170,10 +175,10 @@ def test_analyze_pending_skips_posts_with_unchanged_hash(db):
 def test_analyze_pending_reanalyzes_when_comments_changed(db):
     seed(db, 1)
     client = fake_client()
-    analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    run(db, AnalysisConfig(), client)
     db.upsert_comments([make_comment(post_id="p0", comment_id="baru", text="komentar baru", likes=50)])
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
 
     assert stats["analyzed"] == 1
     assert len(client.messages.calls) == 2
@@ -183,7 +188,7 @@ def test_refusal_is_recorded_as_failed_and_pipeline_continues(db):
     seed(db, 2)
     client = fake_client(["refusal", "ok"])
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
 
     assert stats["analyzed"] == 1 and stats["failed"] == 1
     assert "refusal" in stats["errors"][0]
@@ -196,7 +201,7 @@ def test_rate_limit_waits_and_retries(db):
     client = fake_client([err, "ok"])
     slept = []
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=slept.append)
+    stats = run(db, AnalysisConfig(), client, sleep=slept.append)
 
     assert stats["analyzed"] == 1
     assert slept == [7.0]
@@ -208,7 +213,7 @@ def test_bad_request_is_failed_without_retry(db):
     err = anthropic.BadRequestError("bad", response=response, body=None)
     client = fake_client([err])
 
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
 
     assert stats["failed"] == 1 and len(client.messages.calls) == 1
 
@@ -216,6 +221,6 @@ def test_bad_request_is_failed_without_retry(db):
 def test_post_without_comments_is_still_analyzed(db):
     db.upsert_post(make_post(post_id="solo"))
     client = fake_client()
-    stats = analyze_pending(db, AnalysisConfig(), client, SINCE, sleep=lambda s: None)
+    stats = run(db, AnalysisConfig(), client)
     assert stats["analyzed"] == 1
     assert "belum ada komentar" in client.messages.calls[0]["messages"][0]["content"]

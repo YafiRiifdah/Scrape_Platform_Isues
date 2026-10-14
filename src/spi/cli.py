@@ -151,8 +151,7 @@ def report(
     skip_analysis: bool = typer.Option(False, "--skip-analysis", help="Lewati analisis per post, langsung laporan."),
 ) -> None:
     """Analisis per post (Claude Haiku) lalu susun laporan isu hangat (Claude Opus)."""
-    import anthropic
-
+    from spi.analysis.llm import make_provider
     from spi.analysis.per_post import analyze_pending
     from spi.analysis.report import generate_report
 
@@ -160,7 +159,12 @@ def report(
     n_days = days if days is not None else st.cfg.scrape.days
     until = datetime.now(timezone.utc)
     since = until - timedelta(days=n_days)
-    client = anthropic.Anthropic()
+    try:
+        provider = make_provider(st.cfg.analysis, st.env)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Penyedia LLM: {provider.name} (per post: {st.cfg.analysis.per_post_model}, laporan: {st.cfg.analysis.report_model})")
 
     db = st.open_db()
     try:
@@ -170,7 +174,7 @@ def report(
             def progress(i, n, post):
                 typer.echo(f"  [{i}/{n}] {post.platform}:{post.account} {post.post_id}")
 
-            stats = analyze_pending(db, st.cfg.analysis, client, since, progress=progress)
+            stats = analyze_pending(db, st.cfg.analysis, provider, since, progress=progress)
             typer.echo(
                 f"  selesai: {stats['analyzed']} dianalisis, {stats['skipped']} dilewati (tidak berubah), "
                 f"{stats['failed']} gagal; token {stats['tokens_in']} masuk / {stats['tokens_out']} keluar"
@@ -185,7 +189,7 @@ def report(
 
         typer.echo("Tahap 2: laporan akhir ..." if not dry_run else "Estimasi laporan akhir (dry run) ...")
         try:
-            result = generate_report(db, st.cfg.analysis, client, since, until, st.cfg.storage.reports_dir, failed_accounts, dry_run=dry_run)
+            result = generate_report(db, st.cfg.analysis, provider, since, until, st.cfg.storage.reports_dir, failed_accounts, dry_run=dry_run)
         except RuntimeError as e:
             typer.echo(str(e), err=True)
             raise typer.Exit(code=1)
@@ -193,10 +197,11 @@ def report(
         db.close()
 
     if dry_run:
+        cost = result["estimated_cost_usd"]
+        cost_text = f"≈ ${cost:.2f}" if cost is not None else "(biaya tidak diperkirakan untuk penyedia ini)"
         typer.echo(
             f"  {result['posts_included']} post, perkiraan {result['estimated_input_tokens']:,} token masuk "
-            f"+ {result['estimated_output_tokens']:,} token keluar dengan {result['model']} "
-            f"≈ ${result['estimated_cost_usd']:.2f}"
+            f"+ {result['estimated_output_tokens']:,} token keluar dengan {result['model']} {cost_text}"
         )
     else:
         typer.echo(f"  laporan tersimpan: {result['path']} ({result['posts_included']} post; token {result['tokens_in']} / {result['tokens_out']})")

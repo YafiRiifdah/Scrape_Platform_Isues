@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from spi.analysis.llm import AnthropicProvider
 from spi.analysis.report import build_payload, generate_report
 from spi.config import AnalysisConfig
 from tests.conftest import make_comment, make_post
@@ -72,6 +73,11 @@ def fake_client(stop_reason="end_turn"):
     return SimpleNamespace(messages=FakeMessages(), beta=SimpleNamespace(messages=FakeBetaMessages(stop_reason)))
 
 
+def provider_for(client, cfg=None):
+    cfg = cfg or AnalysisConfig()
+    return AnthropicProvider(client, sleep=lambda s: None, server_side_fallback=cfg.server_side_fallback)
+
+
 def test_build_payload_groups_by_account_and_filters_period(db):
     seed(db)
     payload = build_payload(db, SINCE, UNTIL, failed_accounts={"tiktok:x": "blocked"})
@@ -91,7 +97,7 @@ def test_generate_report_writes_markdown_with_appendix_and_records(db, tmp_path)
     client = fake_client()
     cfg = AnalysisConfig()
 
-    result = generate_report(db, cfg, client, SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
+    result = generate_report(db, cfg, provider_for(client, cfg), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
 
     path = result["path"]
     text = open(path, encoding="utf-8").read()
@@ -116,7 +122,7 @@ def test_generate_report_without_fallback_when_disabled(db, tmp_path):
     client = fake_client()
     cfg = AnalysisConfig(server_side_fallback=False)
 
-    generate_report(db, cfg, client, SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
+    generate_report(db, cfg, provider_for(client, cfg), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
 
     call = client.beta.messages.stream.__self__.calls[0]
     assert "fallbacks" not in call and "betas" not in call
@@ -126,7 +132,7 @@ def test_dry_run_counts_tokens_without_generating(db, tmp_path):
     seed(db)
     client = fake_client()
 
-    result = generate_report(db, AnalysisConfig(), client, SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={}, dry_run=True)
+    result = generate_report(db, AnalysisConfig(), provider_for(client), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={}, dry_run=True)
 
     assert result["dry_run"] is True
     assert result["estimated_input_tokens"] == 4321
@@ -142,7 +148,7 @@ def test_refusal_raises_clear_error(db, tmp_path):
     seed(db)
     client = fake_client(stop_reason="refusal")
     with pytest.raises(RuntimeError, match="menolak"):
-        generate_report(db, AnalysisConfig(), client, SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
+        generate_report(db, AnalysisConfig(), provider_for(client), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
 
 
 def test_report_with_no_analyses_raises(db, tmp_path):
@@ -150,4 +156,4 @@ def test_report_with_no_analyses_raises(db, tmp_path):
 
     client = fake_client()
     with pytest.raises(RuntimeError, match="belum ada"):
-        generate_report(db, AnalysisConfig(), client, SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})
+        generate_report(db, AnalysisConfig(), provider_for(client), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={})

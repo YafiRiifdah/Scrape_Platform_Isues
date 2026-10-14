@@ -9,20 +9,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from spi.analysis import prompts
+from spi.analysis.llm import Provider
 from spi.config import AnalysisConfig
 from spi.storage import Storage
 
 log = logging.getLogger("spi.analysis.report")
 
-# harga per 1 juta token (input, output), USD - untuk estimasi --dry-run saja
-PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-haiku-5-5": (0.10, 0.50),
-}
 ESTIMATED_OUTPUT_TOKENS = 15_000
 REPORT_MAX_TOKENS = 32_000
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
 def _period_label(since: datetime, until: datetime) -> str:
@@ -92,15 +86,10 @@ def _appendix(payload: dict[str, Any], top_n: int = 5) -> str:
     return "\n".join(lines)
 
 
-def _estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:
-    price_in, price_out = PRICES_PER_MTOK.get(model, PRICES_PER_MTOK["claude-opus-5-5"])
-    return tokens_in / 1e6 * price_in + tokens_out / 1e6 * price_out
-
-
 def generate_report(
     db: Storage,
     cfg: AnalysisConfig,
-    client: Any,
+    provider: Provider,
     since: datetime,
     until: datetime,
     reports_dir: str | Path,
@@ -115,44 +104,28 @@ def generate_report(
         )
 
     payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    system = [{"type": "text", "text": prompts.SYSTEM_REPORT, "cache_control": {"type": "ephemeral"}}]
-    messages = [{"role": "user", "content": prompts.build_report_user_message(payload_json, payload["period"])}]
+    user_message = prompts.build_report_user_message(payload_json, payload["period"])
 
     if dry_run:
-        count = client.messages.count_tokens(model=cfg.report_model, system=system, messages=messages)
-        tokens_in = count.input_tokens
+        tokens_in = provider.count_tokens(model=cfg.report_model, system=prompts.SYSTEM_REPORT, user=user_message) or 0
         return {
             "dry_run": True,
             "posts_included": payload["totals"]["posts"],
             "estimated_input_tokens": tokens_in,
             "estimated_output_tokens": ESTIMATED_OUTPUT_TOKENS,
-            "estimated_cost_usd": _estimate_cost(cfg.report_model, tokens_in, ESTIMATED_OUTPUT_TOKENS),
+            "estimated_cost_usd": provider.cost_usd(cfg.report_model, tokens_in, ESTIMATED_OUTPUT_TOKENS),
             "model": cfg.report_model,
+            "provider": provider.name,
         }
 
-    kwargs: dict[str, Any] = dict(
-        model=cfg.report_model,
-        max_tokens=REPORT_MAX_TOKENS,
-        output_config={"effort": "high"},
-        system=system,
-        messages=messages,
-    )
-    if cfg.server_side_fallback:
-        kwargs["betas"] = [FALLBACK_BETA]
-        kwargs["fallbacks"] = "default"
+    log.info("menyusun laporan dengan %s (%s) untuk %d post", cfg.report_model, provider.name, payload["totals"]["posts"])
+    result = provider.generate(model=cfg.report_model, system=prompts.SYSTEM_REPORT, user=user_message, max_tokens=REPORT_MAX_TOKENS)
+    if result.refusal:
+        raise RuntimeError(f"model menolak menyusun laporan (refusal): {result.refusal}")
+    if not result.text.strip():
+        raise RuntimeError("model mengembalikan laporan kosong")
 
-    log.info("menyusun laporan dengan %s untuk %d post", cfg.report_model, payload["totals"]["posts"])
-    with client.beta.messages.stream(**kwargs) as stream:
-        message = stream.get_final_message()
-
-    if message.stop_reason == "refusal":
-        detail = getattr(getattr(message, "stop_details", None), "explanation", "")
-        raise RuntimeError(f"Claude menolak menyusun laporan (refusal): {detail}")
-    if message.stop_reason == "max_tokens":
-        log.warning("laporan terpotong karena max_tokens; pertimbangkan mempersempit rentang")
-
-    text = "".join(block.text for block in message.content if getattr(block, "type", "") == "text").strip()
-    text += "\n" + _appendix(payload)
+    text = result.text.strip() + "\n" + _appendix(payload)
 
     now = now or datetime.now(timezone.utc)
     reports_dir = Path(reports_dir)
@@ -160,13 +133,13 @@ def generate_report(
     path = reports_dir / f"{now:%Y-%m-%d_%H%M}_isu-hangat.md"
     path.write_text(text, encoding="utf-8")
 
-    usage = message.usage
-    db.record_report(str(path), getattr(message, "model", cfg.report_model), payload["totals"]["posts"], usage.input_tokens, usage.output_tokens)
+    db.record_report(str(path), result.model or cfg.report_model, payload["totals"]["posts"], result.tokens_in, result.tokens_out)
     return {
         "dry_run": False,
         "path": str(path),
         "posts_included": payload["totals"]["posts"],
-        "tokens_in": usage.input_tokens,
-        "tokens_out": usage.output_tokens,
-        "model": getattr(message, "model", cfg.report_model),
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        "model": result.model or cfg.report_model,
+        "provider": provider.name,
     }
