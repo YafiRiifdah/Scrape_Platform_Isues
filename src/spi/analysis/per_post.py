@@ -15,7 +15,7 @@ from spi.storage import Storage
 
 log = logging.getLogger("spi.analysis.per_post")
 
-PER_POST_MAX_TOKENS = 2048
+PER_POST_MAX_TOKENS = 8192  # model berpikir ikut memakai jatah ini
 
 
 def analyze_post(provider: Provider, cfg: AnalysisConfig, post: Post, comments: list) -> LLMResult:

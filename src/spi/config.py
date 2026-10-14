@@ -61,6 +61,7 @@ class AnalysisConfig(BaseModel):
     base_url: Optional[str] = None  # hanya untuk openai_compatible, mis. Gemini/Groq/OpenRouter/Ollama
     api_key_env: str = "LLM_API_KEY"  # nama variabel .env yang menyimpan key penyedia openai_compatible
     request_delay_seconds: float = 0.0  # jeda antar panggilan, berguna untuk tier gratis
+    reasoning_effort: Optional[str] = None  # openai_compatible: 'low'/'medium'/'high' untuk model berpikir (Gemini 3.x)
     per_post_model: str = "claude-haiku-5-5"
     report_model: str = "claude-opus-5-5"
     max_comments_to_llm: int = 200

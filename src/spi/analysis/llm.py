@@ -179,7 +179,9 @@ class OpenAICompatibleProvider:
         sleep: Callable[[float], None] = time.sleep,
         request_delay: float = 0.0,
         timeout: float = 180.0,
+        reasoning_effort: Optional[str] = None,
     ):
+        self.reasoning_effort = reasoning_effort
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self._http_post = http_post
@@ -200,6 +202,8 @@ class OpenAICompatibleProvider:
         body: dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort  # model "berpikir": batasi agar max_tokens tidak habis untuk berpikir
 
         url = f"{self.base_url}/chat/completions"
         rate_limits = server_errors = 0
@@ -229,9 +233,15 @@ class OpenAICompatibleProvider:
 
         data = resp.json()
         try:
-            content = data["choices"][0]["message"]["content"] or ""
+            choice = data["choices"][0]
+            content = (choice.get("message") or {}).get("content") or ""
         except (KeyError, IndexError, TypeError) as e:
             raise LLMError(f"respons tidak dikenal: {str(data)[:200]}") from e
+        if not content.strip() and choice.get("finish_reason") == "length":
+            raise LLMError(
+                "balasan kosong karena max_tokens habis (model berpikir memakai token untuk reasoning). "
+                "Perbesar max_tokens atau set analysis.reasoning_effort: low"
+            )
         usage = data.get("usage") or {}
         return content, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0), str(data.get("model") or model)
 
@@ -300,4 +310,4 @@ def make_provider(cfg: AnalysisConfig, env: dict[str, str], sleep: Callable[[flo
     api_key = env.get(cfg.api_key_env) or None
     if not api_key and "localhost" not in cfg.base_url and "127.0.0.1" not in cfg.base_url:
         log.warning("%s kosong; permintaan ke %s dikirim tanpa API key", cfg.api_key_env, cfg.base_url)
-    return OpenAICompatibleProvider(cfg.base_url, api_key, sleep=sleep, request_delay=cfg.request_delay_seconds)
+    return OpenAICompatibleProvider(cfg.base_url, api_key, sleep=sleep, request_delay=cfg.request_delay_seconds, reasoning_effort=cfg.reasoning_effort)

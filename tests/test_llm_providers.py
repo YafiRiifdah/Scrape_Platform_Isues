@@ -111,6 +111,32 @@ def test_generate_returns_text_and_model():
     assert r.text.startswith("# Laporan") and r.model == "llama-3.3-70b"
 
 
+def test_empty_content_due_to_length_gives_clear_error():
+    resp = {"model": "gemini-3.8-flash", "choices": [{"finish_reason": "length", "index": 0, "message": {"role": "assistant"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 50}}
+    p, _, _ = make_openai([resp])
+    with pytest.raises(LLMError, match="max_tokens"):
+        p.generate(model="gemini-3.8-flash", system="S", user="U", max_tokens=50)
+
+
+def test_reasoning_effort_is_sent_when_configured():
+    http = FakeHttp([chat_response("ok")])
+    p = OpenAICompatibleProvider(base_url="https://x/v1", api_key="k", http_post=http, sleep=lambda s: None, reasoning_effort="low")
+    p.generate(model="m", system="S", user="U", max_tokens=10)
+    assert http.calls[0][1]["json"]["reasoning_effort"] == "low"
+
+
+def test_reasoning_effort_absent_by_default():
+    p, http, _ = make_openai([chat_response("ok")])
+    p.generate(model="m", system="S", user="U", max_tokens=10)
+    assert "reasoning_effort" not in http.calls[0][1]["json"]
+
+
+def test_make_provider_passes_reasoning_effort():
+    cfg = AnalysisConfig(provider="openai_compatible", base_url="https://x/v1", reasoning_effort="low")
+    p = make_provider(cfg, {"LLM_API_KEY": "k"})
+    assert p.reasoning_effort == "low"
+
+
 def test_request_delay_paces_free_tier_calls():
     p, _, slept = make_openai([chat_response("a"), chat_response("b")], delay=4.0)
     p.generate(model="m", system="S", user="U", max_tokens=10)

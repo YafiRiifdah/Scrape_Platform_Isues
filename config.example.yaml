@@ -47,9 +47,10 @@ analysis:
   # # base_url: https://openrouter.ai/api/v1                             # OpenRouter
   # # base_url: http://localhost:11434/v1                                # Ollama lokal
   # api_key_env: LLM_API_KEY
-  # per_post_model: gemini-2.5-flash
-  # report_model: gemini-2.5-flash
+  # per_post_model: gemini-3.8-flash
+  # report_model: gemini-3.8-flash
   # request_delay_seconds: 4        # jeda antar panggilan agar tidak kena batas tier gratis
+  # reasoning_effort: low            # untuk model berpikir (Gemini 3.x); hapus bila penyedia menolak
 
   max_comments_to_llm: 200
   top_replied_to_llm: 10
