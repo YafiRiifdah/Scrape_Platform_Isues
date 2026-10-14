@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Optional
 
@@ -29,6 +30,7 @@ COMMENTS_ACTOR = "clockworks~tiktok-comments-scraper"
 SYNC_TIMEOUT_SECONDS = 300
 TOKEN_HINT = "Isi APIFY_TOKEN di .env (Apify Console -> Settings -> Integrations -> Personal API tokens)."
 COMMENT_BATCH_SIZE = 50
+CONNECTION_RETRY_DELAYS = (5, 20)
 
 RunActor = Callable[[str, dict[str, Any]], list[dict[str, Any]]]
 
@@ -112,9 +114,17 @@ def _is_error_item(item: dict[str, Any]) -> bool:
 class TikTokApifyScraper:
     platform = "tiktok"
 
-    def __init__(self, settings: dict[str, Any], run_actor: Optional[RunActor] = None) -> None:
+    def __init__(
+        self,
+        settings: dict[str, Any],
+        run_actor: Optional[RunActor] = None,
+        http_post: Callable[..., Any] = requests.post,
+        retry_sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.settings = settings
         self._run_actor = run_actor or self._run_actor_http
+        self._http_post = http_post
+        self._retry_sleep = retry_sleep
         self._known_posts: dict[str, Post] = {}  # url -> Post, untuk batch komentar
         self._comments_cache: dict[str, list[Comment]] = {}  # post_id -> komentar
         self._comments_fetched = False
@@ -126,15 +136,28 @@ class TikTokApifyScraper:
             raise ScrapeBlocked("APIFY_TOKEN belum diisi. " + TOKEN_HINT)
         return token
 
+    def _scrub(self, text: str) -> str:
+        token = self.settings.get("env", {}).get("APIFY_TOKEN")
+        return text.replace(token, "***") if token else text
+
     def _run_actor_http(self, actor: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        token = self._token()
         url = f"{APIFY_BASE}/acts/{actor}/run-sync-get-dataset-items"
-        params = {"token": self._token(), "timeout": SYNC_TIMEOUT_SECONDS, "format": "json", "clean": "true"}
+        params = {"timeout": SYNC_TIMEOUT_SECONDS, "format": "json", "clean": "true"}
+        headers = {"Authorization": f"Bearer {token}"}  # token di header, bukan di URL, agar tidak bocor ke log
         log.info("Apify %s: menjalankan actor (%s)", actor, ", ".join(f"{k}={v!r}" for k, v in payload.items() if k != "postURLs"))
-        try:
-            resp = requests.post(url, params=params, json=payload, timeout=SYNC_TIMEOUT_SECONDS + 30)
-        except requests.RequestException as e:
-            raise ScraperError(f"koneksi ke Apify gagal: {e}") from e
-        raise_for_apify_status(resp.status_code, resp.text)
+        resp = None
+        for attempt, delay in enumerate(CONNECTION_RETRY_DELAYS + (None,), start=1):
+            try:
+                resp = self._http_post(url, params=params, headers=headers, json=payload, timeout=SYNC_TIMEOUT_SECONDS + 30)
+                break
+            except requests.RequestException as e:
+                msg = self._scrub(str(e))
+                if delay is None:
+                    raise ScraperError(f"koneksi ke Apify gagal setelah {attempt} percobaan: {msg}") from None
+                log.warning("koneksi ke Apify gagal (%s), coba lagi dalam %ds", msg, delay)
+                self._retry_sleep(delay)
+        raise_for_apify_status(resp.status_code, self._scrub(resp.text))
         try:
             data = resp.json()
         except json.JSONDecodeError as e:
@@ -156,7 +179,9 @@ class TikTokApifyScraper:
                 "shouldDownloadSubtitles": False,
             },
         )
-        yielded = 0
+        # Kumpulkan semua post dulu (hasil Apify sudah lengkap di memori) supaya panggilan
+        # fetch_comments pertama bisa membatch komentar untuk SEMUA post dalam satu run actor.
+        posts: list[Post] = []
         for item in items:
             if _is_error_item(item):
                 code = str(item.get("errorCode") or "")
@@ -167,11 +192,13 @@ class TikTokApifyScraper:
             post = map_post_item(item, username)
             if since is not None and post.created_at < since:
                 continue  # termasuk post pinned yang lebih tua
-            self._known_posts[post.url] = post
-            yield post
-            yielded += 1
-            if yielded >= max_posts:
+            posts.append(post)
+            if len(posts) >= max_posts:
                 break
+        for post in posts:
+            self._known_posts[post.url] = post
+        log.info("Apify tiktok:%s: %d post dalam rentang (dari %d hasil)", username, len(posts), len(items))
+        yield from posts
 
     # ---- comments -------------------------------------------------------------
     def _fetch_comments_batch(self, urls: list[str], limit: int) -> None:

@@ -124,6 +124,25 @@ def test_fetch_comments_batches_all_posts_in_one_run_and_serves_per_post():
     assert payload["maxRepliesPerComment"] == 0
 
 
+def test_comments_are_batched_even_when_posts_are_consumed_lazily():
+    """Runner memanggil fetch_comments segera setelah post pertama; batch harus tetap mencakup semua post."""
+    posts_items = [apify_post("a", 1), apify_post("b", 1), apify_post("c", 1)]
+    comments = [apify_comment(str(i), it["webVideoUrl"]) for i, it in enumerate(posts_items)]
+    scraper, runner = make_scraper({POSTS_ACTOR: posts_items, COMMENTS_ACTOR: comments})
+
+    gen = scraper.fetch_posts("kompascom", None, 10)
+    first = next(gen)
+    got_first = list(scraper.fetch_comments(first, limit=5))
+    rest = list(gen)
+    for p in rest:
+        list(scraper.fetch_comments(p, limit=5))
+
+    comment_calls = [c for c in runner.calls if c[0] == COMMENTS_ACTOR]
+    assert len(comment_calls) == 1
+    assert len(comment_calls[0][1]["postURLs"]) == 3
+    assert [c.comment_id for c in got_first] == ["0"]
+
+
 def test_fetch_comments_for_unknown_post_runs_single_request():
     scraper, runner = make_scraper({COMMENTS_ACTOR: [apify_comment("1", "https://www.tiktok.com/@x/video/z")]})
     post = Post(platform="tiktok", account="x", post_id="z", url="https://www.tiktok.com/@x/video/z", created_at=NOW)
@@ -153,6 +172,70 @@ def test_missing_token_gives_actionable_error():
 def test_raise_for_apify_status(status, body, expected):
     with pytest.raises(expected):
         raise_for_apify_status(status, body)
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else []
+        self.text = text or "[]"
+
+    def json(self):
+        return self._payload
+
+
+def make_http_scraper(post_fn, token="apify_api_SECRET123"):
+    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {"APIFY_TOKEN": token}}
+    return TikTokApifyScraper(settings, http_post=post_fn, retry_sleep=lambda s: None)
+
+
+def test_http_sends_token_in_authorization_header_not_url():
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeHttpResponse(payload=[apify_post("a", 1)])
+
+    scraper = make_http_scraper(fake_post)
+    posts = list(scraper.fetch_posts("kompascom", None, 5))
+
+    assert [p.post_id for p in posts] == ["a"]
+    url, kwargs = calls[0]
+    assert "apify_api_SECRET123" not in url
+    assert "token" not in kwargs.get("params", {})
+    assert kwargs["headers"]["Authorization"] == "Bearer apify_api_SECRET123"
+
+
+def test_connection_error_is_retried_then_reported_without_token():
+    import requests
+
+    attempts = []
+
+    def flaky_post(url, **kwargs):
+        attempts.append(1)
+        raise requests.ConnectionError("getaddrinfo failed for ...?token=apify_api_SECRET123")
+
+    scraper = make_http_scraper(flaky_post)
+    with pytest.raises(ScraperError) as exc:
+        list(scraper.fetch_posts("kompascom", None, 5))
+
+    assert len(attempts) == 3
+    assert "apify_api_SECRET123" not in str(exc.value)
+
+
+def test_connection_error_recovers_on_retry():
+    import requests
+
+    state = {"n": 0}
+
+    def post(url, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise requests.ConnectionError("blip")
+        return FakeHttpResponse(payload=[apify_post("a", 1)])
+
+    scraper = make_http_scraper(post)
+    assert [p.post_id for p in scraper.fetch_posts("kompascom", None, 5)] == ["a"]
 
 
 def test_raise_for_apify_status_passes_on_success():
