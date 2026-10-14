@@ -170,6 +170,7 @@ class OpenAICompatibleProvider:
     name = "openai_compatible"
     MAX_RATE_LIMIT_RETRIES = 5
     SERVER_ERROR_RETRIES = 2
+    CONNECTION_RETRIES = 2
 
     def __init__(
         self,
@@ -206,12 +207,17 @@ class OpenAICompatibleProvider:
             body["reasoning_effort"] = self.reasoning_effort  # model "berpikir": batasi agar max_tokens tidak habis untuk berpikir
 
         url = f"{self.base_url}/chat/completions"
-        rate_limits = server_errors = 0
+        rate_limits = server_errors = connection_errors = 0
         while True:
             try:
                 resp = self._http_post(url, headers=headers, json=body, timeout=self.timeout)
             except requests.RequestException as e:
-                raise LLMError(f"koneksi ke {self.base_url} gagal: {e}") from e
+                connection_errors += 1
+                if connection_errors > self.CONNECTION_RETRIES:
+                    raise LLMError(f"koneksi ke {self.base_url} gagal setelah {connection_errors} percobaan: {e}") from e
+                log.warning("koneksi ke %s gagal (%s), coba lagi dalam 5 detik", self.base_url, str(e)[:80])
+                self._sleep(5.0)
+                continue
             status = resp.status_code
             if status == 429:
                 rate_limits += 1

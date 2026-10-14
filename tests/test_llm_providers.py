@@ -137,6 +137,34 @@ def test_make_provider_passes_reasoning_effort():
     assert p.reasoning_effort == "low"
 
 
+def test_connection_error_is_retried_then_succeeds():
+    import requests
+
+    state = {"n": 0}
+
+    def flaky(url, **kw):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise requests.ConnectionError("Connection aborted")
+        return FakeHttp([chat_response("ok")])(url, **kw)
+
+    slept = []
+    p = OpenAICompatibleProvider(base_url="https://x/v1", api_key="k", http_post=flaky, sleep=slept.append)
+    r = p.generate(model="m", system="S", user="U", max_tokens=10)
+    assert r.text == "ok" and state["n"] == 2 and slept == [5.0]
+
+
+def test_connection_error_gives_up_after_retries():
+    import requests
+
+    def always_fail(url, **kw):
+        raise requests.ConnectionError("reset")
+
+    p = OpenAICompatibleProvider(base_url="https://x/v1", api_key="k", http_post=always_fail, sleep=lambda s: None)
+    with pytest.raises(LLMError, match="koneksi"):
+        p.generate(model="m", system="S", user="U", max_tokens=10)
+
+
 def test_request_delay_paces_free_tier_calls():
     p, _, slept = make_openai([chat_response("a"), chat_response("b")], delay=4.0)
     p.generate(model="m", system="S", user="U", max_tokens=10)

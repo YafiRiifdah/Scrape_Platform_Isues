@@ -127,7 +127,7 @@ def generate_report(
 
     text = result.text.strip() + "\n" + _appendix(payload)
 
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now().astimezone()  # waktu lokal untuk nama file
     reports_dir = Path(reports_dir)
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"{now:%Y-%m-%d_%H%M}_isu-hangat.md"

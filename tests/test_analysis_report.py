@@ -117,6 +117,16 @@ def test_generate_report_writes_markdown_with_appendix_and_records(db, tmp_path)
     assert "p2" in body and "harga beras" in body
 
 
+def test_report_filename_uses_local_time(db, tmp_path):
+    from datetime import timedelta
+
+    seed(db)
+    wib = timezone(timedelta(hours=7))
+    now = datetime(2026, 10, 14, 10, 53, tzinfo=timezone.utc).astimezone(wib)  # 17:53 WIB
+    result = generate_report(db, AnalysisConfig(), provider_for(fake_client()), SINCE, UNTIL, reports_dir=tmp_path, failed_accounts={}, now=now)
+    assert result["path"].endswith("2026-10-14_1753_isu-hangat.md")
+
+
 def test_generate_report_without_fallback_when_disabled(db, tmp_path):
     seed(db)
     client = fake_client()
