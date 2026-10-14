@@ -164,6 +164,44 @@ def test_missing_ms_token_proceeds_without_token():
     assert api.create_kwargs["ms_tokens"] is None
 
 
+def test_browser_executable_from_env_is_passed_to_create_sessions():
+    api = FakeApi(FakeUser([tt_video("a", 1)]))
+    settings = {
+        "scrape": ScrapeConfig(),
+        "storage": StorageConfig(),
+        "env": {"SPI_BROWSER_PATH": r"C:\Browsers\msedge.exe"},
+    }
+    scraper = TikTokApiScraper(settings, api_factory=lambda: api, retry_sleep=lambda s: None)
+    list(scraper.fetch_posts("kompascom", None, 10))
+    assert api.create_kwargs["executable_path"] == r"C:\Browsers\msedge.exe"
+
+
+def test_browser_executable_autodetected_when_env_missing(monkeypatch):
+    from spi.scrapers import tiktok_tiktokapi as mod
+
+    monkeypatch.setattr(mod, "detect_system_browser", lambda: r"C:\Detected\chrome.exe")
+    scraper, api = make_scraper([tt_video("a", 1)])
+    list(scraper.fetch_posts("kompascom", None, 10))
+    assert api.create_kwargs["executable_path"] == r"C:\Detected\chrome.exe"
+
+
+def test_session_failure_is_cleaned_up_and_reported():
+    from spi.scrapers.base import ScraperError
+
+    class BrokenApi(FakeApi):
+        async def create_sessions(self, **kwargs):
+            raise RuntimeError("BrowserType.launch: spawn UNKNOWN")
+
+    api = BrokenApi(FakeUser([]))
+    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {}}
+    scraper = TikTokApiScraper(settings, api_factory=lambda: api, retry_sleep=lambda s: None)
+
+    with pytest.raises(ScraperError, match="browser"):
+        list(scraper.fetch_posts("kompascom", None, 10))
+    assert api.closed is True
+    scraper.close()  # tidak boleh melempar
+
+
 def test_close_closes_api():
     scraper, api = make_scraper([tt_video("a", 1)])
     list(scraper.fetch_posts("kompascom", None, 10))

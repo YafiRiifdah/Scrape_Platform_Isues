@@ -11,13 +11,14 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from TikTokApi import TikTokApi
 from TikTokApi import exceptions as ttx
 
 from spi.models import Comment, Post
-from spi.scrapers.base import AccountNotFound, ScrapeBlocked, should_stop
+from spi.scrapers.base import AccountNotFound, ScrapeBlocked, ScraperError, should_stop
 
 log = logging.getLogger("spi.scrapers.tiktok")
 
@@ -26,6 +27,26 @@ MS_TOKEN_HINT = (
     "Perbarui TIKTOK_MS_TOKEN di .env: buka tiktok.com di browser, DevTools (F12) -> "
     "Application -> Cookies -> msToken. Jalankan dari IP rumahan (bukan VPN/datacenter)."
 )
+
+
+SYSTEM_BROWSER_CANDIDATES = (
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "/usr/bin/google-chrome",
+    "/usr/bin/microsoft-edge",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+)
+
+
+def detect_system_browser() -> Optional[str]:
+    """Cari Edge/Chrome terpasang. Chromium bawaan Playwright kadang diblokir Windows
+    (gagal 'spawn UNKNOWN' saat berjendela), sedangkan browser sistem lolos."""
+    for candidate in SYSTEM_BROWSER_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return None
 
 
 def _int(value: Any) -> Optional[int]:
@@ -104,23 +125,39 @@ class TikTokApiScraper:
     def _ensure_api(self) -> Any:
         if self._api is not None:
             return self._api
-        ms_token = self.settings.get("env", {}).get("TIKTOK_MS_TOKEN") or None
+        env = self.settings.get("env", {})
+        ms_token = env.get("TIKTOK_MS_TOKEN") or None
         if not ms_token:
             log.warning("TIKTOK_MS_TOKEN kosong; mencoba tanpa token. Bila respons kosong, isi token. %s", MS_TOKEN_HINT)
+        executable_path = env.get("SPI_BROWSER_PATH") or detect_system_browser()
+        log.info("browser TikTok: %s", executable_path or "Chromium bawaan Playwright")
 
         async def _open():
             api = self._api_factory()
             await api.__aenter__()
-            await api.create_sessions(
-                ms_tokens=[ms_token] if ms_token else None,
-                num_sessions=1,
-                sleep_after=3,
-                browser="chromium",
-                headless=False,
-            )
+            try:
+                await api.create_sessions(
+                    ms_tokens=[ms_token] if ms_token else None,
+                    num_sessions=1,
+                    sleep_after=3,
+                    browser="chromium",
+                    headless=False,
+                    executable_path=executable_path,
+                )
+            except BaseException:
+                await api.__aexit__(None, None, None)
+                raise
             return api
 
-        self._api = self._run(_open())
+        try:
+            self._api = self._run(_open())
+        except ttx.TikTokException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise ScraperError(
+                f"gagal membuka browser untuk TikTok ({type(e).__name__}: {str(e).splitlines()[0]}). "
+                "Pastikan Edge/Chrome terpasang atau isi SPI_BROWSER_PATH di .env dengan path browser."
+            ) from e
         log.info("sesi TikTok dibuat")
         return self._api
 
