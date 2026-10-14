@@ -4,7 +4,7 @@ Alat observasi isu hangat di media sosial. Mengambil postingan dan komentar publ
 media besar Indonesia di **Instagram** dan **TikTok**, menyimpannya ke SQLite lokal, lalu
 menyusun **laporan analisis otomatis** dalam Bahasa Indonesia dengan Claude.
 
-Alur: `spi login` (sekali) → `spi scrape` → `spi report` → baca `reports/*.md`.
+Alur: isi `.env` → `spi login` (sekali, Instagram) → `spi scrape` → `spi report` → baca `reports/*.md`.
 
 ## Peringatan
 
@@ -26,7 +26,7 @@ python -m venv .venv
 Lalu:
 
 1. Salin `config.example.yaml` → `config.yaml`, sesuaikan daftar akun.
-2. Salin `.env.example` → `.env`, isi `ANTHROPIC_API_KEY`, `IG_USERNAME`, `TIKTOK_MS_TOKEN`.
+2. Salin `.env.example` → `.env`, isi `ANTHROPIC_API_KEY`, `IG_USERNAME`, `APIFY_TOKEN`.
 
 Semua perintah di bawah memakai `.venv\Scripts\spi` (atau aktifkan venv dulu).
 
@@ -46,22 +46,23 @@ Kalau Instagram meminta verifikasi (*checkpoint*) dan login lewat terminal gagal
   [`615_import_firefox_session.py`](https://instaloader.github.io/troubleshooting.html#login-error)
   dan simpan hasilnya sebagai `data/ig_session`.
 
-## 2. Ambil ms_token TikTok
+## 2. TikTok lewat Apify (default)
 
-TikTok tidak perlu login, hanya cookie `msToken`:
+Scraping TikTok langsung dari laptop diblokir TikTok saat diuji (Oktober 2026): library TikTokApi
+menerima data kosong, dan halaman video menolak dibuka untuk komentar. Karena itu TikTok memakai
+layanan pihak ketiga **Apify** (berbayar, bayar per hasil):
 
-1. Buka https://www.tiktok.com di Chrome/Edge, scroll beberapa video.
-2. DevTools (F12) → Application → Cookies → `https://www.tiktok.com` → salin nilai `msToken`.
-3. Tempel ke `TIKTOK_MS_TOKEN` di `.env`.
+1. Daftar di https://apify.com (paket gratis memberi kredit ±$5/bulan).
+2. Console -> Settings -> Integrations -> *Personal API tokens* -> salin token.
+3. Tempel ke `APIFY_TOKEN` di `.env`.
 
-Token kedaluwarsa setelah beberapa jam/hari; kalau scraper TikTok mulai mengembalikan respons
-kosong, ambil token baru. Token bersifat opsional: tanpa token scraper tetap mencoba, hanya lebih
-mudah diblokir.
+Actor yang dipakai: `clockworks/tiktok-scraper` (video per profil, mulai ±$1,70 per 1.000 video) dan
+`clockworks/tiktok-comments-scraper` (komentar, mulai ±$0,50 per 1.000 komentar; cek harga terkini
+di halaman actor). Komentar untuk semua post satu akun dibatch dalam satu run supaya murah.
+Perkiraan 15 akun × 7 hari × 200 komentar: sekitar $10-20 per pengambilan penuh.
 
-Saat scraping, sebuah jendela browser akan terbuka (bukan headless, supaya tidak terdeteksi bot).
-Biarkan saja. Scraper otomatis memakai Edge atau Chrome yang terpasang karena Chromium bawaan
-Playwright sering diblokir Windows saat dibuka berjendela (`spawn UNKNOWN`). Kalau ingin browser
-lain, isi `SPI_BROWSER_PATH` di `.env`.
+Adapter cadangan tanpa biaya (`tiktok_playwright`, `tiktokapi`) tetap tersedia lewat `adapter:` di
+`config.yaml`; lihat tabel adapter di bawah.
 
 ## 3. Scraping
 
@@ -130,8 +131,9 @@ Mengganti mesin cukup lewat `adapter:` per akun di `config.yaml`, tanpa mengubah
 |---|---|---|---|
 | `instaloader` | Instagram | aktif (default) | Perlu sesi login `spi login` |
 | `instagram_playwright` | Instagram | kerangka | Rencana di docstring modul |
-| `tiktok_playwright` | TikTok | aktif (default) | Browser Edge/Chrome sungguhan, profil persisten di `data/browser_profile/tiktok`, menyadap JSON internal TikTok saat scroll. Balasan komentar tidak diambil. Bila CAPTCHA muncul, selesaikan di jendela browser (ditunggu `captcha_wait_seconds`). |
-| `tiktokapi` | TikTok | cadangan | Library TikTokApi. Saat diuji (Okt 2026) TikTok membalas data user kosong bahkan dengan `msToken`, sehingga tidak dipakai default. |
+| `tiktok_apify` | TikTok | aktif (default) | Layanan Apify berbayar, butuh `APIFY_TOKEN`. Paling stabil. |
+| `tiktok_playwright` | TikTok | cadangan, gratis | Browser Edge/Chrome sungguhan, profil persisten di `data/browser_profile/tiktok`, membaca JSON internal TikTok saat scroll. Saat diuji: daftar post berhasil (48 post), halaman video untuk komentar diblokir TikTok. |
+| `tiktokapi` | TikTok | cadangan, gratis | Library TikTokApi, butuh `TIKTOK_MS_TOKEN`. Saat diuji TikTok membalas data user kosong. |
 
 ## Pengembangan
 
