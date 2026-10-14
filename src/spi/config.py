@@ -12,7 +12,7 @@ from spi.models import Platform
 
 DEFAULT_ADAPTERS: dict[str, str] = {
     "instagram": "instaloader",
-    "tiktok": "tiktok_playwright",  # tiktokapi diblokir TikTok saat diuji Okt 2026
+    "tiktok": "tiktok_apify",  # library/scraping langsung diblokir TikTok saat diuji Okt 2026
 }
 
 DelayRange = tuple[float, float]

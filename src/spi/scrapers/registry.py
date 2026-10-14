@@ -14,6 +14,7 @@ _ADAPTERS: dict[str, tuple[str, str, str]] = {
     "instagram_playwright": ("instagram", "spi.scrapers.instagram_playwright", "InstagramPlaywrightScraper"),
     "tiktokapi": ("tiktok", "spi.scrapers.tiktok_tiktokapi", "TikTokApiScraper"),
     "tiktok_playwright": ("tiktok", "spi.scrapers.tiktok_playwright", "TikTokPlaywrightScraper"),
+    "tiktok_apify": ("tiktok", "spi.scrapers.tiktok_apify", "TikTokApifyScraper"),
 }
 
 

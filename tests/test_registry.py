@@ -10,6 +10,7 @@ def test_known_adapter_names_are_registered():
         "instagram_playwright",
         "tiktokapi",
         "tiktok_playwright",
+        "tiktok_apify",
     }
 
 
