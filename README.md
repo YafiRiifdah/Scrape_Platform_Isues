@@ -121,14 +121,17 @@ Lihat `config.example.yaml`. Bagian penting:
 | `scrape.older_posts_tolerance` | Jumlah post pinned (lebih tua) yang ditoleransi sebelum berhenti |
 | `analysis.per_post_model`, `analysis.report_model` | Model Claude tahap 1 dan 2 |
 
-## Kalau scraper rusak
+## Adapter scraper dan kalau scraper rusak
 
 Setiap platform punya dua adapter dengan antarmuka sama (`src/spi/scrapers/base.py`).
-Adapter aktif: `instaloader` (Instagram) dan `tiktokapi` (TikTok). Adapter cadangan
-`instagram_playwright` dan `tiktok_playwright` sudah terdaftar tetapi masih kerangka: docstring
-di masing-masing modul berisi rencana implementasinya (browser Chromium persisten, login manual
-sekali, tangkap respons JSON internal saat scroll). Mengganti mesin cukup lewat `adapter:` di
-`config.yaml` tanpa mengubah kode lain.
+Mengganti mesin cukup lewat `adapter:` per akun di `config.yaml`, tanpa mengubah kode lain.
+
+| Adapter | Platform | Status | Catatan |
+|---|---|---|---|
+| `instaloader` | Instagram | aktif (default) | Perlu sesi login `spi login` |
+| `instagram_playwright` | Instagram | kerangka | Rencana di docstring modul |
+| `tiktok_playwright` | TikTok | aktif (default) | Browser Edge/Chrome sungguhan, profil persisten di `data/browser_profile/tiktok`, menyadap JSON internal TikTok saat scroll. Balasan komentar tidak diambil. Bila CAPTCHA muncul, selesaikan di jendela browser (ditunggu `captcha_wait_seconds`). |
+| `tiktokapi` | TikTok | cadangan | Library TikTokApi. Saat diuji (Okt 2026) TikTok membalas data user kosong bahkan dengan `msToken`, sehingga tidak dipakai default. |
 
 ## Pengembangan
 

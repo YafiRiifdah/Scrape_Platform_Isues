@@ -40,13 +40,13 @@ def test_account_adapter_defaults_by_platform():
             "accounts": [
                 {"platform": "instagram", "username": "a", "label": "A"},
                 {"platform": "tiktok", "username": "b", "label": "B"},
-                {"platform": "tiktok", "username": "c", "label": "C", "adapter": "tiktok_playwright"},
+                {"platform": "tiktok", "username": "c", "label": "C", "adapter": "tiktokapi"},
             ]
         }
     )
     assert cfg.accounts[0].adapter == "instaloader"
-    assert cfg.accounts[1].adapter == "tiktokapi"
-    assert cfg.accounts[2].adapter == "tiktok_playwright"
+    assert cfg.accounts[1].adapter == "tiktok_playwright"
+    assert cfg.accounts[2].adapter == "tiktokapi"
 
 
 def test_account_key_combines_platform_and_username():

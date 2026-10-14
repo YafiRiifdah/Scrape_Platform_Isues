@@ -174,6 +174,16 @@ class TikTokPlaywrightScraper:
             )
 
     @staticmethod
+    def _goto(page: Any, url: str, label: str) -> None:
+        """Navigasi; error jaringan/HTTP dari Playwright diterjemahkan ke ScraperError."""
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except ScraperError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise ScraperError(f"{label}: halaman tidak bisa dibuka ({str(e).splitlines()[0]})") from e
+
+    @staticmethod
     def _raise_for_status(status: int, label: str) -> None:
         if status == 429:
             raise RateLimited(f"{label}: TikTok membalas 429")
@@ -188,7 +198,7 @@ class TikTokPlaywrightScraper:
         page = self._page_factory()
         page.on("response", self._sink_handler(ITEM_LIST_PATH, sink))
         try:
-            page.goto(f"https://www.tiktok.com/@{username}", wait_until="domcontentloaded", timeout=60000)
+            self._goto(page, f"https://www.tiktok.com/@{username}", f"tiktok:{username}")
             self._pause(page, 3, 5)
             self._check_blocked(page, f"tiktok:{username}")
             idle = 0
@@ -222,7 +232,7 @@ class TikTokPlaywrightScraper:
         page = self._page_factory()
         page.on("response", self._sink_handler(COMMENT_LIST_PATH, sink))
         try:
-            page.goto(post.url, wait_until="domcontentloaded", timeout=60000)
+            self._goto(page, post.url, f"tiktok:{post.account}/{post.post_id}")
             self._pause(page, 3, 5)
             self._check_blocked(page, f"tiktok:{post.account}/{post.post_id}")
             idle = 0

@@ -42,16 +42,26 @@ def _select_accounts(
 
 def _scrape_account(
     acc: AccountConfig, cfg: AppConfig, db: Storage, env: dict[str, str], since: datetime, sleep: SleepFn
-) -> tuple[int, int]:
+) -> tuple[int, int, Optional[str]]:
     """Ambil post dan komentar satu akun. Melempar ScraperError bila gagal."""
     scraper = registry.build(acc.adapter, acc.platform, cfg, env)
-    posts_found = comments_found = 0
+    posts_found = comments_found = comment_failures = 0
+    last_comment_error: Optional[str] = None
     lo, hi = cfg.scrape.delay_between_requests
     try:
         for post in scraper.fetch_posts(acc.username, since, cfg.scrape.max_posts_per_account):
             db.upsert_post(post)
             posts_found += 1
-            comments = list(scraper.fetch_comments(post, cfg.scrape.max_comments_per_post))
+            try:
+                comments = list(scraper.fetch_comments(post, cfg.scrape.max_comments_per_post))
+            except RateLimited:
+                raise
+            except Exception as e:  # noqa: BLE001 - post tetap tersimpan, komentar dilewati
+                comment_failures += 1
+                last_comment_error = f"{type(e).__name__}: {e}"
+                log.warning("%s post %s: komentar gagal diambil (%s)", acc.key, post.post_id, last_comment_error)
+                sleep(random.uniform(lo, hi))
+                continue
             comments_found += db.upsert_comments(comments[: cfg.scrape.max_comments_per_post])
             log.info(
                 "%s post %s: %d komentar tersimpan", acc.key, post.post_id, min(len(comments), cfg.scrape.max_comments_per_post)
@@ -59,7 +69,8 @@ def _scrape_account(
             sleep(random.uniform(lo, hi))
     finally:
         scraper.close()
-    return posts_found, comments_found
+    note = f"{comment_failures} post tanpa komentar (terakhir: {last_comment_error})" if comment_failures else None
+    return posts_found, comments_found, note
 
 
 def run_scrape(
@@ -85,7 +96,7 @@ def run_scrape(
         while True:
             attempts += 1
             try:
-                posts_found, comments_found = _scrape_account(acc, cfg, db, env, since, sleep)
+                posts_found, comments_found, error = _scrape_account(acc, cfg, db, env, since, sleep)
                 break
             except RateLimited as e:
                 if attempts == 1:

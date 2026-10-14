@@ -203,6 +203,20 @@ def test_fetch_posts_raises_rate_limited_on_429():
         list(scraper.fetch_posts("kompascom", None, 10))
 
 
+def test_navigation_error_is_translated_to_scraper_error():
+    from spi.scrapers.base import ScraperError
+
+    class BrokenPage(FakePage):
+        def goto(self, url, **kw):
+            raise RuntimeError("Page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE")
+
+    page = BrokenPage(responses=[])
+    scraper = make_scraper(page)
+    with pytest.raises(ScraperError, match="ERR_HTTP_RESPONSE_CODE_FAILURE"):
+        list(scraper.fetch_posts("kompascom", None, 10))
+    assert page.closed is True
+
+
 def test_fetch_comments_collects_until_limit():
     from spi.models import Post
 

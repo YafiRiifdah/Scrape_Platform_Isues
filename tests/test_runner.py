@@ -82,6 +82,28 @@ def test_run_scrape_stores_posts_and_comments_and_closes_scraper(db, monkeypatch
     assert all(s.closed for s in FakeScraper.instances)
 
 
+def test_comment_failure_on_one_post_keeps_other_posts(db, monkeypatch):
+    settings = _install_fake(monkeypatch, {})
+    cfg = make_config(["a"])
+
+    original = FakeScraper.fetch_comments
+
+    def flaky(self, post, limit):
+        if post.post_id == "a-1":
+            raise ScrapeBlocked("halaman video diblokir")
+        return original(self, post, limit)
+
+    monkeypatch.setattr(FakeScraper, "fetch_comments", flaky)
+
+    _, summary = run_scrape(cfg, db, env={}, sleep=lambda s: None)
+
+    assert summary["instagram:a"]["status"] == "ok"
+    assert summary["instagram:a"]["posts_found"] == 2
+    assert db.count_comments("instagram", "a-1") == 0
+    assert db.count_comments("instagram", "a-2") == 2
+    assert "1 post tanpa komentar" in (summary["instagram:a"]["error"] or "")
+
+
 def test_blocked_account_does_not_stop_other_accounts(db, monkeypatch):
     _install_fake(monkeypatch, {"a": "blocked", "c": "crash"})
     cfg = make_config(["a", "b", "c"])

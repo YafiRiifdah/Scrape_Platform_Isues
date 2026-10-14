@@ -16,7 +16,8 @@ accounts:
   - platform: tiktok
     username: detikcom
     label: detikcom
-  # adapter opsional per akun: instaloader | instagram_playwright | tiktokapi | tiktok_playwright
+  # adapter opsional per akun (default: instaloader untuk instagram, tiktok_playwright untuk tiktok):
+  #   instaloader | instagram_playwright | tiktok_playwright | tiktokapi
   # - platform: instagram
   #   username: tempodotco
   #   label: Tempo
