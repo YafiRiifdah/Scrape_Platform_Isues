@@ -4,12 +4,12 @@ Alat observasi isu hangat di media sosial. Mengambil postingan dan komentar publ
 media besar Indonesia di **Instagram** dan **TikTok**, menyimpannya ke SQLite lokal, lalu
 menyusun **laporan analisis otomatis** dalam Bahasa Indonesia dengan Claude.
 
-Alur: isi `.env` → `spi login` (sekali, Instagram) → `spi scrape` → `spi report` → baca `reports/*.md`.
+Alur: isi `.env` (token Apify + key LLM) → `spi scrape` → `spi report` → baca `reports/*.md`.
 
 ## Peringatan
 
 - Scraping otomatis **melanggar Terms of Service** Instagram dan TikTok. Data yang diambil hanya
-  data publik, tetapi akun yang dipakai login bisa diblokir. **Gunakan akun Instagram sekunder**,
+  data publik. Bila memakai adapter login (`instaloader`), **gunakan akun Instagram sekunder**,
   bukan akun utama Anda.
 - Library pihak ketiga (Instaloader, TikTokApi) bisa rusak sewaktu-waktu saat platform berubah.
   Lihat bagian *Kalau scraper rusak*.
@@ -30,21 +30,24 @@ Lalu:
 
 Semua perintah di bawah memakai `.venv\Scripts\spi` (atau aktifkan venv dulu).
 
-## 1. Login Instagram (sekali)
+## 1. Instagram lewat Apify (default)
 
-```bash
-spi login
-```
+Instagram diambil lewat Apify, sama seperti TikTok, jadi **tidak perlu akun Instagram**. Cukup isi
+`APIFY_TOKEN` di `.env`. Actor yang dipakai: `apify/instagram-scraper` (post, $2,70 per 1.000) dan
+`apify/instagram-comment-scraper` (komentar, $2,60 per 1.000).
 
-Memakai `IG_USERNAME` dari `.env`, meminta password (dan kode 2FA bila ada), lalu menyimpan sesi
-ke `data/ig_session`. Sesi dipakai ulang oleh `spi scrape`.
+Kenapa tidak gratis: saat diuji (November 2026) Instagram menolak akses tanpa login, dan menolak
+login dari script Instaloader (`Login error: "fail" status`) meskipun akunnya bisa login normal di
+browser. Adapter `instaloader` dan perintah `spi login` tetap ada kalau suatu saat ingin dicoba lagi
+(isi `IG_USERNAME`, set `adapter: instaloader` pada akun di `config.yaml`).
 
-Kalau Instagram meminta verifikasi (*checkpoint*) dan login lewat terminal gagal:
+Keterbatasan Instagram via Apify:
 
-- Buka instagram.com di browser dengan akun sekunder, selesaikan verifikasi, coba lagi; atau
-- Login di Firefox, lalu impor cookie-nya dengan script resmi Instaloader
-  [`615_import_firefox_session.py`](https://instaloader.github.io/troubleshooting.html#login-error)
-  dan simpan hasilnya sebagai `data/ig_session`.
+- Komentar yang dikembalikan adalah yang **terbaru**, bukan yang paling populer. Dengan batas kecil
+  (misalnya 5), komentar ter-like bisa terlewat; pakai batas 30-50 agar reaksi publik terwakili.
+- **Jumlah balasan per komentar kosong** di paket gratis Apify (fitur balasan khusus paket berbayar),
+  sehingga bagian "komentar paling memicu diskusi" hanya terisi untuk TikTok.
+- Jumlah share tidak tersedia; jumlah like bisa kosong bila akun menyembunyikannya.
 
 ## 2. TikTok lewat Apify (default)
 
@@ -68,7 +71,7 @@ Adapter cadangan tanpa biaya (`tiktok_playwright`, `tiktokapi`) tetap tersedia l
 
 ```bash
 spi scrape                                  # semua akun, rentang dari config (default 7 hari)
-spi scrape --only instagram:kompascom --days 1 --max-comments 20   # uji kecil dulu
+spi scrape --only instagram:kompascom --days 2 --max-posts 5 --max-comments 20   # uji kecil dulu
 spi scrape --resume 20261014-120000-ab12cd  # lanjutkan akun yang rate_limited/pending
 spi status                                  # ringkasan isi database
 ```
@@ -126,7 +129,7 @@ Lihat `config.example.yaml`. Bagian penting:
 
 | Kunci | Arti |
 |---|---|
-| `accounts[].adapter` | Mesin scraper per akun: `instaloader`, `tiktokapi`, atau cadangan `instagram_playwright`, `tiktok_playwright` |
+| `accounts[].adapter` | Mesin scraper per akun. Default `instagram_apify` dan `tiktok_apify`; lihat tabel adapter di bawah |
 | `scrape.days` | Rentang hari ke belakang |
 | `scrape.max_comments_per_post` | Batas komentar per post |
 | `scrape.older_posts_tolerance` | Jumlah post pinned (lebih tua) yang ditoleransi sebelum berhenti |
@@ -139,7 +142,8 @@ Mengganti mesin cukup lewat `adapter:` per akun di `config.yaml`, tanpa mengubah
 
 | Adapter | Platform | Status | Catatan |
 |---|---|---|---|
-| `instaloader` | Instagram | aktif (default) | Perlu sesi login `spi login` |
+| `instagram_apify` | Instagram | aktif (default) | Layanan Apify berbayar, butuh `APIFY_TOKEN`. Teruji nyata. |
+| `instaloader` | Instagram | cadangan, gratis | Perlu sesi login `spi login`. Saat diuji, login dari script ditolak Instagram. |
 | `instagram_playwright` | Instagram | kerangka | Rencana di docstring modul |
 | `tiktok_apify` | TikTok | aktif (default) | Layanan Apify berbayar, butuh `APIFY_TOKEN`. Paling stabil. |
 | `tiktok_playwright` | TikTok | cadangan, gratis | Browser Edge/Chrome sungguhan, profil persisten di `data/browser_profile/tiktok`, membaca JSON internal TikTok saat scroll. Saat diuji: daftar post berhasil (48 post), halaman video untuk komentar diblokir TikTok. |
