@@ -67,6 +67,34 @@ Perkiraan 15 akun × 7 hari × 200 komentar: sekitar $10-20 per pengambilan penu
 Adapter cadangan tanpa biaya (`tiktok_playwright`, `tiktokapi`) tetap tersedia lewat `adapter:` di
 `config.yaml`; lihat tabel adapter di bawah.
 
+### Beberapa token Apify dan sisa kredit
+
+`.env` menerima lebih dari satu token:
+
+```
+APIFY_TOKEN=token_utama
+APIFY_TOKENS=token_kedua,token_ketiga
+```
+
+Urutan pemakaian: `APIFY_TOKEN` dulu, lalu isi `APIFY_TOKENS` dari kiri ke kanan. Cara kerjanya:
+
+- Sebelum tiap run actor, sisa kredit token aktif dicek. Bila di bawah
+  `scrape.apify_min_remaining_usd` (default $0,25), token itu dilewati dan token berikutnya dipakai.
+- Bila Apify menolak karena kredit habis (HTTP 402/403) atau token tidak sah (401), token itu dilewati
+  untuk sisa proses dan run diulang dengan token berikutnya.
+- Bila semua token habis, akun yang sedang diproses ditandai gagal dengan pesan yang jelas dan bisa
+  dilanjutkan nanti dengan `spi scrape --resume`.
+- Token tidak pernah ditulis ke log; yang tampil hanya nomor urut dan empat karakter terakhirnya.
+
+Lihat sisa kredit semua token:
+
+```bash
+spi credits
+```
+
+Catatan: ketentuan umum Apify membatasi satu akun pribadi per pengguna kecuali diizinkan Apify.
+Pemakaian token dari beberapa akun adalah tanggung jawab pemilik akun.
+
 ## 3. Scraping
 
 ```bash

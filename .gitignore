@@ -9,5 +9,5 @@ dist/
 # data lokal dan rahasia
 .env
 data/
-reports/*.md
+reports/*
 config.yaml

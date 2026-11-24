@@ -32,6 +32,7 @@ scrape:
   delay_between_accounts: [30, 90]
   older_posts_tolerance: 3            # post pinned yang lebih tua sebelum berhenti
   rate_limit_sleep_minutes: 15
+  apify_min_remaining_usd: 0.25       # token Apify dengan sisa kredit di bawah ini dilewati
 
 analysis:
   # Pilihan 1 (default): Claude lewat API Anthropic, berbayar per token (±$0,35-1,30 per laporan).

@@ -231,6 +231,41 @@ def export(
         typer.echo(f"  {p}")
 
 
+# ---- credits ---------------------------------------------------------------------
+@app.command()
+def credits(ctx: typer.Context) -> None:
+    """Sisa kredit Apify untuk setiap token di .env (APIFY_TOKEN / APIFY_TOKENS)."""
+    from spi.scrapers.apify_base import TOKEN_HINT, get_pool
+
+    st = _state(ctx)
+    pool = get_pool(st.env)
+    if not pool.tokens:
+        typer.echo("Belum ada token Apify. " + TOKEN_HINT + " Contoh: APIFY_TOKENS=token_satu,token_dua", err=True)
+        raise typer.Exit(code=1)
+
+    minimum = st.cfg.scrape.apify_min_remaining_usd
+    rows = pool.report()
+    typer.echo(f"{'Token':7} {'Akun':22} {'Terpakai':>9} {'Batas':>8} {'Sisa':>8}  {'Siklus berakhir':15}  Status")
+    total = 0.0
+    for r in rows:
+        if r["error"]:
+            typer.echo(f"{r['position']:7} {r['token']:22} {'-':>9} {'-':>8} {'-':>8}  {'-':15}  gagal dicek: {r['error']}")
+            continue
+        total += max(r["remaining_usd"], 0.0)
+        if r["skipped"]:
+            state = f"dilewati: {r['skipped']}"
+        elif r["remaining_usd"] < minimum:
+            state = f"di bawah batas ${minimum:.2f}, akan dilewati"
+        else:
+            state = "aktif" if r["active"] else "cadangan"
+        account = f"{r['username'] or '?'} ({r['token']})"
+        typer.echo(
+            f"{r['position']:7} {account:22} {'$%.2f' % r['used_usd']:>9} {'$%.2f' % r['limit_usd']:>8} "
+            f"{'$%.2f' % r['remaining_usd']:>8}  {r['cycle_end'] or '-':15}  {state}"
+        )
+    typer.echo(f"\nTotal sisa kredit: ${total:.2f} dari {len(rows)} token. Token dipakai berurutan dari atas.")
+
+
 # ---- status ----------------------------------------------------------------------
 @app.command()
 def status(ctx: typer.Context) -> None:

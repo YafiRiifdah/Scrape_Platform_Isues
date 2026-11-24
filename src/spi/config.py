@@ -51,6 +51,7 @@ class ScrapeConfig(BaseModel):
     older_posts_tolerance: int = 3
     rate_limit_sleep_minutes: float = 15
     captcha_wait_seconds: float = 180
+    apify_min_remaining_usd: float = 0.25  # token dengan sisa kredit di bawah ini dilewati (bila ada token lain)
 
     _v1 = field_validator("delay_between_requests")(_check_range)
     _v2 = field_validator("delay_between_accounts")(_check_range)
