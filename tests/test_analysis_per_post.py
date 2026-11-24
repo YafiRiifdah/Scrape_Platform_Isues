@@ -224,3 +224,41 @@ def test_post_without_comments_is_still_analyzed(db):
     stats = run(db, AnalysisConfig(), client)
     assert stats["analyzed"] == 1
     assert "belum ada komentar" in client.messages.calls[0]["messages"][0]["content"]
+
+
+def test_user_message_label_reflects_selection_mode():
+    post = make_post()
+    comments = [make_comment(comment_id="1", text="ramai", replies_count=9)]
+    assert "balasan terbanyak" in prompts.build_post_user_message(post, comments, selection="top_replied")
+    assert "like terbanyak" in prompts.build_post_user_message(post, comments, selection="top_liked")
+
+
+def test_system_prompt_requires_relevance_filtering():
+    text = prompts.SYSTEM_PER_POST
+    assert "relevan" in text
+    assert "relevant_comment_count" in text
+
+
+def test_post_analysis_relevant_comment_count_defaults_and_validates():
+    assert PostAnalysis.model_validate(VALID_ANALYSIS).relevant_comment_count == 0
+    assert PostAnalysis.model_validate(dict(VALID_ANALYSIS, relevant_comment_count=7)).relevant_comment_count == 7
+    with pytest.raises(ValidationError):
+        PostAnalysis.model_validate(dict(VALID_ANALYSIS, relevant_comment_count=-1))
+
+
+def test_analyze_pending_sends_only_few_most_replied_comments(db):
+    db.upsert_post(make_post(post_id="p0"))
+    comments = [make_comment(post_id="p0", comment_id=f"like{i}", text=f"populer{i}", likes=500 - i, replies_count=0) for i in range(5)]
+    comments += [
+        make_comment(post_id="p0", comment_id="d1", text="debat satu", likes=1, replies_count=40),
+        make_comment(post_id="p0", comment_id="d2", text="debat dua", likes=2, replies_count=30),
+    ]
+    db.upsert_comments(comments)
+    client = fake_client()
+
+    run(db, AnalysisConfig(max_comments_to_llm=2, comment_selection="top_replied"), client)
+
+    body = client.messages.calls[0]["messages"][0]["content"]
+    assert "debat satu" in body and "debat dua" in body
+    assert "populer0" not in body
+    assert "2 dengan balasan terbanyak" in body

@@ -32,3 +32,12 @@ def test_export_writes_three_csv_files_with_bom(db, tmp_path):
     assert arows[0]["topics"] == "beras"
     assert arows[0]["sentiment_pro"] == "1.0"
     assert arows[0]["intensity"] == "rendah"
+
+
+def test_export_analysis_includes_relevant_comment_count(db, tmp_path):
+    db.upsert_post(make_post(post_id="p1"))
+    db.save_analysis("instagram", "p1", "m", {"topics": ["x"], "sentiment": {"pro": 1.0, "kontra": 0.0, "netral": 0.0}, "intensity": "rendah", "relevant_comment_count": 4}, "h")
+    export_csv(db, tmp_path, since=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    with open(tmp_path / "post_analysis.csv", encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["relevant_comment_count"] == "4"

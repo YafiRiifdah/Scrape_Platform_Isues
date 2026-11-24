@@ -66,12 +66,13 @@ def export_csv(db: Storage, out_dir: str | Path, since: Optional[datetime] = Non
                     "sentiment_kontra": sentiment.get("kontra", ""),
                     "sentiment_netral": sentiment.get("netral", ""),
                     "intensity": an.get("intensity", ""),
+                    "relevant_comment_count": an.get("relevant_comment_count", ""),
                     "public_reaction_summary": an.get("public_reaction_summary", ""),
                     "model": a["model"],
                 }
             )
     comment_header = ["platform", "account", "post_id", "comment_id", "text", "created_at", "likes", "replies_count", "is_reply", "parent_comment_id"]
-    analysis_header = ["platform", "account", "post_id", "url", "created_at", "topics", "issue_summary", "sentiment_pro", "sentiment_kontra", "sentiment_netral", "intensity", "public_reaction_summary", "model"]
+    analysis_header = ["platform", "account", "post_id", "url", "created_at", "topics", "issue_summary", "sentiment_pro", "sentiment_kontra", "sentiment_netral", "intensity", "relevant_comment_count", "public_reaction_summary", "model"]
 
     return [
         _write(out / "posts.csv", post_header, post_rows),

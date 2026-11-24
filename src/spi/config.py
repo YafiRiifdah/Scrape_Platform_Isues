@@ -64,8 +64,12 @@ class AnalysisConfig(BaseModel):
     reasoning_effort: Optional[str] = None  # openai_compatible: 'low'/'medium'/'high' untuk model berpikir (Gemini 3.x)
     per_post_model: str = "claude-haiku-5-5"
     report_model: str = "claude-opus-5-5"
-    max_comments_to_llm: int = 200
-    top_replied_to_llm: int = 10  # komentar paling banyak dibalas yang dijamin ikut ke LLM
+    # Pemilihan komentar untuk dirangkum LLM:
+    #   top_replied = hanya beberapa komentar dengan balasan terbanyak (like sebagai pemecah seri/cadangan)
+    #   top_liked   = komentar ter-like, dengan `top_replied_to_llm` komentar paling dibalas dijamin ikut
+    comment_selection: Literal["top_replied", "top_liked"] = "top_replied"
+    max_comments_to_llm: int = 15  # jumlah komentar kandidat yang dikirim ke LLM per post
+    top_replied_to_llm: int = 10  # hanya untuk mode top_liked
     language: str = "id"
     server_side_fallback: bool = True
 

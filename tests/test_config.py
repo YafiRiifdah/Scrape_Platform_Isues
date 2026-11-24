@@ -69,3 +69,9 @@ def test_delay_range_must_be_ascending():
                 "scrape": {"delay_between_requests": [6, 2]},
             }
         )
+
+
+def test_analysis_defaults_select_few_most_replied_comments():
+    cfg = AppConfig.model_validate({"accounts": [{"platform": "tiktok", "username": "a", "label": "A"}]})
+    assert cfg.analysis.comment_selection == "top_replied"
+    assert cfg.analysis.max_comments_to_llm == 15

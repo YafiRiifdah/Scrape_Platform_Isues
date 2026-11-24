@@ -25,8 +25,9 @@ accounts:
 
 scrape:
   days: 7
-  max_comments_per_post: 200
-  max_posts_per_account: 100
+  # Batas biaya Apify (bayar per hasil). Bisa ditimpa per run: --max-posts, --max-comments, --days.
+  max_posts_per_account: 30     # post terbaru per akun
+  max_comments_per_post: 30     # komentar yang diambil per post (kumpulan kandidat)
   delay_between_requests: [2, 6]      # detik, acak di antara dua angka
   delay_between_accounts: [30, 90]
   older_posts_tolerance: 3            # post pinned yang lebih tua sebelum berhenti
@@ -52,8 +53,13 @@ analysis:
   # request_delay_seconds: 4        # jeda antar panggilan agar tidak kena batas tier gratis
   # reasoning_effort: low            # untuk model berpikir (Gemini 3.x); hapus bila penyedia menolak
 
-  max_comments_to_llm: 200
-  top_replied_to_llm: 10
+  # Komentar yang dirangkum LLM per post, dipilih dari kandidat yang sudah diambil:
+  #   top_replied = hanya komentar dengan balasan terbanyak (like sebagai cadangan bila balasan tak tersedia)
+  #   top_liked   = komentar ter-like, dengan top_replied_to_llm komentar paling dibalas dijamin ikut
+  # LLM hanya memakai komentar yang relevan dengan isu postingan.
+  comment_selection: top_replied
+  max_comments_to_llm: 15
+  top_replied_to_llm: 10          # hanya untuk mode top_liked
   language: id
 
 storage:

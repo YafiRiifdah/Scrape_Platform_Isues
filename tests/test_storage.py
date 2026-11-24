@@ -157,3 +157,29 @@ def test_record_report(db):
     reports = db.list_reports()
     assert reports[0]["path"] == "reports/x.md"
     assert reports[0]["posts_included"] == 12
+
+
+def test_llm_selection_top_replied_orders_by_replies_then_likes_and_skips_replies(db):
+    db.upsert_post(make_post())
+    db.upsert_comments(
+        [
+            make_comment(comment_id="viral_like", likes=900, replies_count=0),
+            make_comment(comment_id="debat_besar", likes=5, replies_count=80),
+            make_comment(comment_id="debat_sedang", likes=50, replies_count=20),
+            make_comment(comment_id="debat_sedang_b", likes=10, replies_count=20),
+            make_comment(comment_id="balasan", likes=999, replies_count=None, is_reply=True, parent_comment_id="debat_besar"),
+        ]
+    )
+
+    got = db.get_comments_for_llm("instagram", "ABC123", limit=3, mode="top_replied")
+
+    assert [c.comment_id for c in got] == ["debat_besar", "debat_sedang", "debat_sedang_b"]
+
+
+def test_llm_selection_top_replied_falls_back_to_likes_when_reply_counts_unknown(db):
+    db.upsert_post(make_post())
+    db.upsert_comments([make_comment(comment_id=f"c{i}", likes=i * 10, replies_count=None) for i in range(5)])
+
+    got = db.get_comments_for_llm("instagram", "ABC123", limit=2, mode="top_replied")
+
+    assert [c.comment_id for c in got] == ["c4", "c3"]

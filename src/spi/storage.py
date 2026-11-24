@@ -248,8 +248,22 @@ class Storage:
         )
         return [self._row_to_comment(r) for r in rows]
 
-    def get_comments_for_llm(self, platform: str, post_id: str, limit: int, top_replied: int = 10) -> list[Comment]:
-        """Komentar teratas berdasarkan like, dengan jaminan komentar paling banyak dibalas ikut serta."""
+    def get_comments_for_llm(
+        self, platform: str, post_id: str, limit: int, top_replied: int = 10, mode: str = "top_liked"
+    ) -> list[Comment]:
+        """Pilih komentar untuk dirangkum LLM.
+
+        mode "top_replied": hanya komentar level atas dengan balasan terbanyak; like jadi pemecah seri,
+        sehingga bila jumlah balasan tidak diketahui (mis. Instagram via Apify gratis) urutannya menurut like.
+        mode "top_liked": komentar ter-like, dengan `top_replied` komentar paling dibalas dijamin ikut.
+        """
+        if mode == "top_replied":
+            rows = self.conn.execute(
+                self._COMMENT_SELECT
+                + " AND c.is_reply = 0 ORDER BY replies_eff DESC, COALESCE(c.likes, 0) DESC, c.created_at ASC LIMIT ?",
+                (platform, post_id, limit),
+            )
+            return [self._row_to_comment(r) for r in rows]
         replied = [
             self._row_to_comment(r)
             for r in self.conn.execute(

@@ -9,23 +9,36 @@ from typing import Iterable
 from spi.models import Comment, Post
 
 SYSTEM_PER_POST = """Anda analis media sosial yang meneliti isu publik di Indonesia.
-Anda menerima satu postingan dari akun media besar (Instagram atau TikTok) beserta komentar
-publik yang paling banyak disukai. Tugas Anda mengisi skema JSON yang diminta, dalam Bahasa Indonesia.
+Anda menerima satu postingan dari akun media besar (Instagram atau TikTok) beserta sejumlah kecil
+komentar publik pilihan (yang paling banyak dibalas, atau paling disukai bila jumlah balasan tidak
+tersedia). Setiap komentar diberi label [N like, M balasan]. Tugas Anda mengisi skema JSON yang
+diminta, dalam Bahasa Indonesia.
+
+Langkah pertama, saring relevansi: sebuah komentar RELEVAN bila membahas isu, tokoh, pihak, atau
+peristiwa yang diangkat postingan (termasuk kritik, dukungan, pertanyaan, sindiran, dan lelucon
+yang jelas merujuk ke isu itu). TIDAK relevan: promosi/jualan, spam, menandai teman tanpa isi,
+emoji saja, salam, ajakan follow, dan obrolan atau isu lain yang tidak berkaitan dengan postingan.
+Abaikan sepenuhnya komentar yang tidak relevan; seluruh isian di bawah hanya boleh berdasar pada
+komentar relevan.
 
 Pedoman:
 - topics: 1-3 frasa pendek huruf kecil yang menamai isu (contoh: "kenaikan harga beras",
   "banjir jakarta"), bukan kategori umum seperti "politik".
 - issue_summary: 1-2 kalimat netral tentang isi postingan.
-- sentiment: proporsi komentar yang pro, kontra, dan netral TERHADAP ISI/PIHAK yang diangkat
-  postingan, berjumlah 1.0. Komentar lelucon atau tidak relevan dihitung netral.
-- public_reaction_summary: 2-3 kalimat tentang pola reaksi netizen, sebutkan argumen dominan.
-- representative_comments: maksimal 3 kutipan komentar apa adanya (boleh dipotong) yang paling mewakili.
-- intensity: "tinggi" bila komentar banyak berdebat/marah, "rendah" bila datar atau sedikit.
-- discussion_triggers: setiap komentar diberi label [N like, M balasan]. Pilih 0-2 komentar dengan
-  balasan terbanyak (M terbesar, minimal 1) yang paling memicu perdebatan; salin angka balasannya
-  apa adanya dan jelaskan singkat kenapa komentar itu memancing diskusi. Kosongkan bila semua M = 0.
-Jika komentar belum ada, nilai sentiment netral 1.0, intensity "rendah", dan reaksi publik
-ditulis "Belum ada komentar yang bisa dianalisis"."""
+- relevant_comment_count: jumlah komentar yang Anda nilai relevan dari yang diberikan.
+- sentiment: proporsi komentar relevan yang pro, kontra, dan netral TERHADAP ISI/PIHAK yang
+  diangkat postingan, berjumlah 1.0.
+- public_reaction_summary: 2-3 kalimat rangkuman reaksi netizen dari komentar relevan, sebutkan
+  argumen dominan.
+- representative_comments: maksimal 3 kutipan komentar relevan apa adanya (boleh dipotong) yang
+  paling mewakili.
+- intensity: "tinggi" bila komentar relevan banyak berdebat/marah, "rendah" bila datar atau sedikit.
+- discussion_triggers: pilih 0-2 komentar relevan dengan balasan terbanyak (M terbesar, minimal 1)
+  yang paling memicu perdebatan; salin angka balasannya apa adanya dan jelaskan singkat kenapa
+  komentar itu memancing diskusi. Kosongkan bila semua M = 0.
+Jika komentar belum ada atau tidak ada yang relevan: relevant_comment_count 0, sentiment netral 1.0,
+intensity "rendah", representative_comments dan discussion_triggers kosong, dan reaksi publik
+ditulis "Belum ada komentar relevan yang bisa dianalisis"."""
 
 SYSTEM_REPORT = """Anda analis senior yang menyusun laporan observasi isu hangat di media sosial
 Indonesia untuk tim riset. Anda menerima ringkasan per postingan (hasil analisis tahap pertama)
@@ -44,12 +57,15 @@ akun yang paling mendorong isu, dan rujukan post (sebutkan URL dari data).
 Bandingkan bagaimana media yang berbeda membingkai isu yang sama.
 ## 4. Reaksi Publik
 Pola sentimen dominan per isu, argumen pro/kontra utama, kutipan komentar representatif.
+Catatan data: reaksi publik per post dirangkum dari sejumlah kecil komentar yang paling banyak
+dibalas dan relevan dengan isu post (lihat relevant_comment_count), bukan dari seluruh komentar.
 Sertakan sub-bagian "Komentar yang paling memicu diskusi": untuk tiap isu, komentar dengan balasan
 terbanyak (dari field discussion_triggers) beserta jumlah balasan dan alasan ia memancing perdebatan.
 ## 5. Isu yang Naik dan Meredup
 Berdasarkan tanggal post dan engagement dalam rentang waktu.
 ## 6. Metodologi dan Keterbatasan
-Jumlah akun, post, komentar; akun yang gagal diambil; batas komentar per post; bias sampel.
+Jumlah akun, post, komentar; akun yang gagal diambil; batas komentar per post; cara pemilihan
+komentar (balasan terbanyak dan relevan saja) dan bias sampel yang ditimbulkannya.
 
 Aturan: hanya gunakan informasi dari data yang diberikan, jangan mengarang fakta di luar data.
 Setiap klaim tentang isu harus bisa ditelusuri ke post yang dirujuk. Gunakan angka dari data,
@@ -60,7 +76,15 @@ def _fmt_int(v) -> str:
     return "-" if v is None else f"{v:,}".replace(",", ".")
 
 
-def build_post_user_message(post: Post, comments: Iterable[Comment], max_chars: int = 300) -> str:
+SELECTION_LABELS = {
+    "top_replied": "dengan balasan terbanyak",
+    "top_liked": "dengan like terbanyak",
+}
+
+
+def build_post_user_message(
+    post: Post, comments: Iterable[Comment], max_chars: int = 300, selection: str = "top_replied"
+) -> str:
     lines = [
         f"Platform: {post.platform}",
         f"Akun: {post.account}",
@@ -79,7 +103,8 @@ def build_post_user_message(post: Post, comments: Iterable[Comment], max_chars: 
     if not comments:
         lines.append("Komentar: belum ada komentar yang terambil.")
     else:
-        lines.append(f"Komentar ({len(comments)} teratas berdasarkan like):")
+        label = SELECTION_LABELS.get(selection, SELECTION_LABELS["top_replied"])
+        lines.append(f"Komentar ({len(comments)} {label}; nilai relevansinya dulu):")
         for c in comments:
             text = " ".join(c.text.split())
             if len(text) > max_chars:

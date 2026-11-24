@@ -78,7 +78,15 @@ spi status                                  # ringkasan isi database
 
 Perilaku:
 
-- Komentar dibatasi `max_comments_per_post` (default 200), diprioritaskan yang paling banyak like.
+- **Batas biaya**: `max_posts_per_account` (post per akun) dan `max_comments_per_post` (komentar per
+  post) di `config.yaml`, atau per run lewat `--max-posts`, `--max-comments`, `--days`.
+- **Komentar yang dirangkum**: dari komentar yang diambil, hanya `max_comments_to_llm` (default 15)
+  dengan **balasan terbanyak** yang dikirim ke LLM (`comment_selection: top_replied`). LLM lalu
+  menyaring relevansi: komentar spam, promosi, atau di luar isu postingan diabaikan, dan jumlah
+  komentar yang dipakai dicatat di `relevant_comment_count`. Catatan: Apify tidak bisa diminta
+  "hanya komentar paling dibalas", jadi penyaringan terjadi setelah kandidat diambil; biaya Apify
+  ditentukan `max_comments_per_post`. Untuk Instagram (jumlah balasan tidak tersedia di paket
+  gratis Apify) urutannya memakai jumlah like.
 - Ada jeda acak antar request dan antar akun. Kalau kena rate limit, script menunggu
   `rate_limit_sleep_minutes` lalu mencoba sekali lagi; kalau tetap gagal, akun ditandai
   `rate_limited` dan bisa dilanjutkan dengan `--resume`.
@@ -131,7 +139,9 @@ Lihat `config.example.yaml`. Bagian penting:
 |---|---|
 | `accounts[].adapter` | Mesin scraper per akun. Default `instagram_apify` dan `tiktok_apify`; lihat tabel adapter di bawah |
 | `scrape.days` | Rentang hari ke belakang |
-| `scrape.max_comments_per_post` | Batas komentar per post |
+| `scrape.max_posts_per_account` | Batas post per akun |
+| `scrape.max_comments_per_post` | Batas komentar yang diambil per post |
+| `analysis.comment_selection`, `analysis.max_comments_to_llm` | Cara memilih dan jumlah komentar yang dirangkum LLM |
 | `scrape.older_posts_tolerance` | Jumlah post pinned (lebih tua) yang ditoleransi sebelum berhenti |
 | `analysis.per_post_model`, `analysis.report_model` | Model Claude tahap 1 dan 2 |
 

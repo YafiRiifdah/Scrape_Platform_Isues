@@ -38,6 +38,9 @@ class PostAnalysis(BaseModel):
     intensity: Literal["rendah", "sedang", "tinggi"] = Field(
         description="Seberapa panas perdebatan di komentar"
     )
+    relevant_comment_count: int = Field(
+        default=0, ge=0, description="Jumlah komentar yang dinilai relevan dengan isu postingan"
+    )
     discussion_triggers: list[DiscussionTrigger] = Field(
         default_factory=list,
         max_length=2,
