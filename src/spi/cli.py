@@ -84,6 +84,16 @@ def _state(ctx: typer.Context) -> State:
     return ctx.obj
 
 
+def _local(ts: Optional[str], fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """Waktu tersimpan (UTC) ditampilkan dalam zona waktu komputer ini."""
+    if not ts:
+        return "-"
+    try:
+        return datetime.fromisoformat(ts).astimezone().strftime(fmt)
+    except ValueError:
+        return ts[:16]
+
+
 # ---- login -----------------------------------------------------------------------
 @app.command()
 def login(ctx: typer.Context) -> None:
@@ -385,7 +395,7 @@ def apify_status(ctx: typer.Context) -> None:
         typer.echo(f"Pengguna   : {st.user_name}")
         if cred:
             typer.echo(f"Akun Apify : {cred['apify_username'] or '?'} (id {cred['apify_user_id']})")
-            typer.echo(f"Token      : ...{cred['token_last4']}, terenkripsi, terhubung {cred['created_at'][:10]}")
+            typer.echo(f"Token      : ...{cred['token_last4']}, terenkripsi, terhubung {_local(cred['created_at'], '%Y-%m-%d')}")
         elif legacy:
             typer.echo("Token      : APIFY_TOKEN dari .env (cara lama, belum terenkripsi)")
             typer.echo("             Pindahkan dengan: spi key init, lalu spi apify connect --from-env")
@@ -436,7 +446,7 @@ def jobs(
             for r in runs:
                 cred = f"#{r['credential_id']}" if r["credential_id"] else "-"
                 typer.echo(
-                    f"{r['run_id']:24} {r['started_at'][:16]:16} {r['accounts']:>4} {r['ok']:>3} {r['not_ok']:>5} "
+                    f"{r['run_id']:24} {_local(r['started_at']):16} {r['accounts']:>4} {r['ok']:>3} {r['not_ok']:>5} "
                     f"{r['posts_found']:>6} {r['comments_found']:>8}  {cred}"
                 )
             executions = db.list_executions(user_id, limit=limit)
@@ -447,7 +457,7 @@ def jobs(
                 cost = f"${e['usage_usd']:.4f}" if e["usage_usd"] is not None else "-"
                 items = e["items"] if e["items"] is not None else "-"
                 typer.echo(
-                    f"{e['started_at'][:16]:16} {e['actor'][:36]:36} {e['status']:11} {items:>5} {cost:>8}  {e['error_kind'] or ''}"
+                    f"{_local(e['started_at']):16} {e['actor'][:36]:36} {e['status']:11} {items:>5} {cost:>8}  {e['error_kind'] or ''}"
                 )
             typer.echo(
                 "\n* Angka yang dilaporkan Apify saat run selesai; biaya per hasil bisa belum termasuk. "
