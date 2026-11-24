@@ -109,6 +109,7 @@ def scrape(
     only: Optional[list[str]] = typer.Option(None, "--only", help="Batasi ke akun tertentu, format platform:username. Bisa diulang."),
     days: Optional[int] = typer.Option(None, "--days", help="Ambil post N hari terakhir (default dari config)."),
     max_comments: Optional[int] = typer.Option(None, "--max-comments", help="Batas komentar per post."),
+    max_posts: Optional[int] = typer.Option(None, "--max-posts", help="Batas post per akun (mengendalikan biaya Apify)."),
     resume: Optional[str] = typer.Option(None, "--resume", help="Lanjutkan run yang belum selesai (RUN_ID)."),
 ) -> None:
     """Ambil post dan komentar dari semua akun di config."""
@@ -119,6 +120,8 @@ def scrape(
         st.cfg.scrape.days = days
     if max_comments is not None:
         st.cfg.scrape.max_comments_per_post = max_comments
+    if max_posts is not None:
+        st.cfg.scrape.max_posts_per_account = max_posts
 
     db = st.open_db()
     try:

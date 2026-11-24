@@ -8,6 +8,7 @@ def test_known_adapter_names_are_registered():
     assert set(registry.available_adapters()) == {
         "instaloader",
         "instagram_playwright",
+        "instagram_apify",
         "tiktokapi",
         "tiktok_playwright",
         "tiktok_apify",

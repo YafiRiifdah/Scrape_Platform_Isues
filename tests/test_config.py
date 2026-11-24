@@ -44,7 +44,7 @@ def test_account_adapter_defaults_by_platform():
             ]
         }
     )
-    assert cfg.accounts[0].adapter == "instaloader"
+    assert cfg.accounts[0].adapter == "instagram_apify"
     assert cfg.accounts[1].adapter == "tiktok_apify"
     assert cfg.accounts[2].adapter == "tiktokapi"
 

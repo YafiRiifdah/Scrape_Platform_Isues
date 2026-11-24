@@ -12,6 +12,7 @@ from spi.scrapers.base import BaseScraper
 _ADAPTERS: dict[str, tuple[str, str, str]] = {
     "instaloader": ("instagram", "spi.scrapers.instagram_instaloader", "InstaloaderScraper"),
     "instagram_playwright": ("instagram", "spi.scrapers.instagram_playwright", "InstagramPlaywrightScraper"),
+    "instagram_apify": ("instagram", "spi.scrapers.instagram_apify", "InstagramApifyScraper"),
     "tiktokapi": ("tiktok", "spi.scrapers.tiktok_tiktokapi", "TikTokApiScraper"),
     "tiktok_playwright": ("tiktok", "spi.scrapers.tiktok_playwright", "TikTokPlaywrightScraper"),
     "tiktok_apify": ("tiktok", "spi.scrapers.tiktok_apify", "TikTokApifyScraper"),

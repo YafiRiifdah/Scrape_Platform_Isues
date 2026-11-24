@@ -52,3 +52,23 @@ def test_missing_config_gives_helpful_message(tmp_path):
     result = runner.invoke(app, ["--config", str(tmp_path / "x.yaml"), "status"])
     assert result.exit_code != 0
     assert "config.example.yaml" in result.output
+
+
+def test_scrape_max_posts_and_max_comments_override_config(tmp_path, monkeypatch):
+    import spi.runner as runner_mod
+
+    captured = {}
+
+    def fake_run_scrape(cfg, db, env, only=None, resume_run_id=None, **kw):
+        captured["max_posts"] = cfg.scrape.max_posts_per_account
+        captured["max_comments"] = cfg.scrape.max_comments_per_post
+        captured["days"] = cfg.scrape.days
+        return "run-x", {}
+
+    monkeypatch.setattr(runner_mod, "run_scrape", fake_run_scrape)
+    cfg = write_config(tmp_path)
+
+    result = runner.invoke(app, ["--config", str(cfg), "scrape", "--max-posts", "5", "--max-comments", "7", "--days", "2"])
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"max_posts": 5, "max_comments": 7, "days": 2}

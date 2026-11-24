@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from spi.models import Platform
 
 DEFAULT_ADAPTERS: dict[str, str] = {
-    "instagram": "instaloader",
+    "instagram": "instagram_apify",  # Instagram menolak akses tanpa login dan login script (uji Nov 2026)
     "tiktok": "tiktok_apify",  # library/scraping langsung diblokir TikTok saat diuji Okt 2026
 }
 
