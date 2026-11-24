@@ -62,7 +62,7 @@ def _install_fake(monkeypatch, behaviour):
     monkeypatch.setattr(
         registry,
         "build",
-        lambda adapter, platform, cfg, env: FakeScraper(settings),
+        lambda adapter, platform, cfg, env, **kw: FakeScraper(settings),
     )
     return settings
 

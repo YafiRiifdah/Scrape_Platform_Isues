@@ -95,7 +95,7 @@ class TikTokApifyScraper(ApifyBase):
 
     # ---- posts ----------------------------------------------------------------
     def fetch_posts(self, username: str, since: Optional[datetime], max_posts: int) -> Iterator[Post]:
-        self._token()
+        self._require_access()
         items = self._run_actor(
             POSTS_ACTOR,
             {

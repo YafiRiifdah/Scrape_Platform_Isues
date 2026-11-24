@@ -1,7 +1,12 @@
-"""Orkestrasi scraping per akun: jeda acak, retry rate limit, checkpoint, dan ringkasan."""
+"""Orkestrasi scraping per akun: jeda acak, retry rate limit, checkpoint, dan ringkasan.
+
+Setiap run (job) punya pemilik. Akun yang diambil lewat Apify memakai token milik pemilik job saja;
+bila pemilik tidak punya token atau kuotanya habis, akun itu gagal dan tidak ada token lain yang dicoba.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import random
 import time
@@ -9,7 +14,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from spi.config import AccountConfig, AppConfig
+from spi.credentials import CredentialError, CredentialService
+from spi.crypto import DecryptError, MasterKeyError
 from spi.scrapers import registry
+from spi.scrapers.apify_base import ApifyAccess
 from spi.scrapers.base import RateLimited, ScraperError
 from spi.storage import Storage
 
@@ -19,10 +27,13 @@ SleepFn = Callable[[float], None]
 
 
 def _select_accounts(
-    cfg: AppConfig, db: Storage, only: Optional[list[str]], resume_run_id: Optional[str]
+    cfg: AppConfig, db: Storage, only: Optional[list[str]], resume_run_id: Optional[str], user_id: int
 ) -> tuple[str, list[AccountConfig]]:
     by_key = {a.key: a for a in cfg.accounts}
     if resume_run_id:
+        # Run hanya boleh dilanjutkan pemiliknya. Pesannya sama untuk "tidak ada" dan "milik pengguna lain".
+        if db.run_owner(resume_run_id) != user_id:
+            raise ValueError(f"run {resume_run_id} tidak ditemukan untuk pengguna ini")
         keys = db.pending_accounts(resume_run_id, include_retryable=True)
         missing = [k for k in keys if k not in by_key]
         if missing:
@@ -36,15 +47,42 @@ def _select_accounts(
         if unknown:
             raise ValueError(f"akun tidak ada di config: {', '.join(sorted(unknown))}")
         accounts = [a for a in accounts if a.key in wanted]
-    run_id = db.start_run([a.key for a in accounts])
+    run_id = db.start_run([a.key for a in accounts], user_id=user_id)
     return run_id, accounts
 
 
+def _resolve_apify_access(
+    db: Storage, credentials: CredentialService, user_id: int, run_id: str, accounts: list[AccountConfig]
+) -> tuple[Optional[ApifyAccess], Optional[str]]:
+    """Ambil token Apify milik pemilik job dan ikat ke run. Mengembalikan (akses, alasan bila tidak ada)."""
+    apify_keys = [a.key for a in accounts if registry.uses_apify(a.adapter)]
+    if not apify_keys:
+        return None, None
+    try:
+        access = credentials.resolve_for_job(user_id)
+    except (CredentialError, MasterKeyError, DecryptError) as e:
+        log.error("run %s: token Apify pemilik job tidak tersedia: %s", run_id, e)
+        return None, str(e)
+    db.set_run_credential(run_id, apify_keys, access.credential_id)
+
+    def record(execution: dict[str, Any]) -> None:
+        db.record_execution(user_id=user_id, credential_id=access.credential_id, run_id=run_id, **execution)
+
+    return dataclasses.replace(access, on_execution=record), None
+
+
 def _scrape_account(
-    acc: AccountConfig, cfg: AppConfig, db: Storage, env: dict[str, str], since: datetime, sleep: SleepFn
+    acc: AccountConfig,
+    cfg: AppConfig,
+    db: Storage,
+    env: dict[str, str],
+    since: datetime,
+    sleep: SleepFn,
+    apify: Optional[ApifyAccess] = None,
+    apify_error: Optional[str] = None,
 ) -> tuple[int, int, Optional[str]]:
     """Ambil post dan komentar satu akun. Melempar ScraperError bila gagal."""
-    scraper = registry.build(acc.adapter, acc.platform, cfg, env)
+    scraper = registry.build(acc.adapter, acc.platform, cfg, env, apify=apify, apify_error=apify_error)
     posts_found = comments_found = comment_failures = 0
     last_comment_error: Optional[str] = None
     lo, hi = cfg.scrape.delay_between_requests
@@ -81,12 +119,19 @@ def run_scrape(
     resume_run_id: Optional[str] = None,
     sleep: SleepFn = time.sleep,
     now: Optional[datetime] = None,
+    user_id: Optional[int] = None,
+    credentials: Optional[CredentialService] = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    """Jalankan scraping untuk akun di config. Mengembalikan (run_id, ringkasan akun yang diproses)."""
+    """Jalankan scraping untuk akun di config atas nama `user_id` (default: pengguna default).
+
+    Mengembalikan (run_id, ringkasan akun yang diproses).
+    """
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=cfg.scrape.days)
-    run_id, accounts = _select_accounts(cfg, db, only, resume_run_id)
-    log.info("run %s: %d akun, post sejak %s", run_id, len(accounts), since.isoformat())
+    owner = user_id if user_id is not None else db.default_user_id()
+    run_id, accounts = _select_accounts(cfg, db, only, resume_run_id, owner)
+    apify, apify_error = _resolve_apify_access(db, credentials or CredentialService(db, env), owner, run_id, accounts)
+    log.info("run %s: pengguna %s, %d akun, post sejak %s", run_id, owner, len(accounts), since.isoformat())
 
     processed: list[str] = []
     for idx, acc in enumerate(accounts):
@@ -96,7 +141,9 @@ def run_scrape(
         while True:
             attempts += 1
             try:
-                posts_found, comments_found, error = _scrape_account(acc, cfg, db, env, since, sleep)
+                posts_found, comments_found, error = _scrape_account(
+                    acc, cfg, db, env, since, sleep, apify=apify, apify_error=apify_error
+                )
                 break
             except RateLimited as e:
                 if attempts == 1:

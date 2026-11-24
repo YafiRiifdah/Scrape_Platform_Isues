@@ -1,9 +1,10 @@
-"""CLI `spi`: login, scrape, report, export, status."""
+"""CLI `spi`: login, scrape, report, export, status, serta pengguna dan token Apify milik masing-masing."""
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -12,24 +13,39 @@ import typer
 from dotenv import load_dotenv
 
 from spi.config import AppConfig, load_config
-from spi.storage import Storage
+from spi.storage import DEFAULT_USER, Storage
 
 app = typer.Typer(
     help="Scrape Platform Issues: observasi isu hangat dari akun media besar di Instagram dan TikTok.",
     no_args_is_help=True,
     add_completion=False,
 )
+key_app = typer.Typer(help="Kunci induk untuk mengenkripsi token yang disimpan.", no_args_is_help=True)
+user_app = typer.Typer(help="Pengguna. Setiap pengguna memakai token Apify miliknya sendiri.", no_args_is_help=True)
+apify_app = typer.Typer(help="Token Apify milik pengguna yang dipilih dengan --user.", no_args_is_help=True)
+app.add_typer(key_app, name="key")
+app.add_typer(user_app, name="user")
+app.add_typer(apify_app, name="apify")
 
 
 class State:
-    def __init__(self, cfg: AppConfig, env: dict[str, str]):
+    def __init__(self, cfg: AppConfig, env: dict[str, str], user_name: str = DEFAULT_USER):
         self.cfg = cfg
         self.env = env
+        self.user_name = user_name or DEFAULT_USER
 
     def open_db(self) -> Storage:
         db = Storage(self.cfg.storage.db_path)
         db.init_db()
         return db
+
+    def user_id(self, db: Storage) -> int:
+        """Id pengguna yang dipilih. Pengguna harus dibuat lebih dulu; tidak ada pembuatan otomatis."""
+        row = db.get_user(self.user_name)
+        if row is None:
+            typer.echo(f"Pengguna {self.user_name!r} belum ada. Buat dengan: spi user add {self.user_name}", err=True)
+            raise typer.Exit(code=1)
+        return int(row["user_id"])
 
 
 def _setup_logging(cfg: AppConfig, verbose: bool) -> None:
@@ -48,6 +64,9 @@ def main(
     ctx: typer.Context,
     config: Path = typer.Option("config.yaml", "--config", "-c", help="File konfigurasi akun."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Log lebih rinci."),
+    user: str = typer.Option(
+        DEFAULT_USER, "--user", "-u", envvar="SPI_USER", help="Pengguna yang menjalankan perintah. Job memakai token Apify miliknya."
+    ),
 ) -> None:
     load_dotenv()
     if not config.exists():
@@ -58,7 +77,7 @@ def main(
         raise typer.Exit(code=1)
     cfg = load_config(config)
     _setup_logging(cfg, verbose)
-    ctx.obj = State(cfg, dict(os.environ))
+    ctx.obj = State(cfg, dict(os.environ), user_name=(user or "").strip())
 
 
 def _state(ctx: typer.Context) -> State:
@@ -112,7 +131,7 @@ def scrape(
     max_posts: Optional[int] = typer.Option(None, "--max-posts", help="Batas post per akun (mengendalikan biaya Apify)."),
     resume: Optional[str] = typer.Option(None, "--resume", help="Lanjutkan run yang belum selesai (RUN_ID)."),
 ) -> None:
-    """Ambil post dan komentar dari semua akun di config."""
+    """Ambil post dan komentar dari semua akun di config, memakai token Apify milik pengguna (--user)."""
     from spi.runner import run_scrape
 
     st = _state(ctx)
@@ -125,7 +144,7 @@ def scrape(
 
     db = st.open_db()
     try:
-        run_id, summary = run_scrape(st.cfg, db, st.env, only=only or None, resume_run_id=resume)
+        run_id, summary = run_scrape(st.cfg, db, st.env, only=only or None, resume_run_id=resume, user_id=st.user_id(db))
     except ValueError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(code=1)
@@ -186,7 +205,7 @@ def report(
                 typer.echo(f"  ! {err}")
 
         failed_accounts = {}
-        run_id = db.latest_run_id()
+        run_id = db.latest_run_id(user_id=st.user_id(db))
         if run_id:
             failed_accounts = {k: f"{v['status']}: {v['error']}" for k, v in db.run_summary(run_id).items() if v["status"] != "ok"}
 
@@ -231,39 +250,211 @@ def export(
         typer.echo(f"  {p}")
 
 
-# ---- credits ---------------------------------------------------------------------
-@app.command()
-def credits(ctx: typer.Context) -> None:
-    """Sisa kredit Apify untuk setiap token di .env (APIFY_TOKEN / APIFY_TOKENS)."""
-    from spi.scrapers.apify_base import TOKEN_HINT, get_pool
+# ---- key ---------------------------------------------------------------------------
+@key_app.command("init")
+def key_init(
+    ctx: typer.Context,
+    env_file: Path = typer.Option(Path(".env"), "--env-file", help="File .env tempat kunci disimpan."),
+) -> None:
+    """Buat kunci induk enkripsi (SPI_MASTER_KEY) dan simpan di .env. Cukup sekali."""
+    from spi.crypto import MASTER_KEY_ENV, generate_master_key
 
     st = _state(ctx)
-    pool = get_pool(st.env)
-    if not pool.tokens:
-        typer.echo("Belum ada token Apify. " + TOKEN_HINT + " Contoh: APIFY_TOKENS=token_satu,token_dua", err=True)
+    existing = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+    filled = re.search(rf"^[ \t]*{MASTER_KEY_ENV}[ \t]*=[ \t]*\S", existing, re.M)
+    if filled or (st.env.get(MASTER_KEY_ENV) or "").strip():
+        typer.echo(
+            f"{MASTER_KEY_ENV} sudah ada dan tidak diubah. Mengganti kunci membuat semua token tersimpan tidak bisa dibuka.",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
-    minimum = st.cfg.scrape.apify_min_remaining_usd
-    rows = pool.report()
-    typer.echo(f"{'Token':7} {'Akun':22} {'Terpakai':>9} {'Batas':>8} {'Sisa':>8}  {'Siklus berakhir':15}  Status")
-    total = 0.0
-    for r in rows:
-        if r["error"]:
-            typer.echo(f"{r['position']:7} {r['token']:22} {'-':>9} {'-':>8} {'-':>8}  {'-':15}  gagal dicek: {r['error']}")
-            continue
-        total += max(r["remaining_usd"], 0.0)
-        if r["skipped"]:
-            state = f"dilewati: {r['skipped']}"
-        elif r["remaining_usd"] < minimum:
-            state = f"di bawah batas ${minimum:.2f}, akan dilewati"
-        else:
-            state = "aktif" if r["active"] else "cadangan"
-        account = f"{r['username'] or '?'} ({r['token']})"
-        typer.echo(
-            f"{r['position']:7} {account:22} {'$%.2f' % r['used_usd']:>9} {'$%.2f' % r['limit_usd']:>8} "
-            f"{'$%.2f' % r['remaining_usd']:>8}  {r['cycle_end'] or '-':15}  {state}"
+    line = f"{MASTER_KEY_ENV}={generate_master_key()}"
+    empty = re.compile(rf"^[ \t]*{MASTER_KEY_ENV}[ \t]*=[ \t]*$", re.M)
+    if empty.search(existing):
+        content = empty.sub(lambda m: line, existing, count=1)
+    else:
+        content = existing + ("" if not existing or existing.endswith("\n") else "\n")
+        content += (
+            "\n# Kunci induk enkripsi token Apify (AES-256-GCM). Jangan dibagikan dan jangan di-commit.\n"
+            "# Bila kunci ini hilang, token tersimpan tidak bisa dibuka dan harus dihubungkan ulang.\n"
+            f"{line}\n"
         )
-    typer.echo(f"\nTotal sisa kredit: ${total:.2f} dari {len(rows)} token. Token dipakai berurutan dari atas.")
+    env_file.write_text(content, encoding="utf-8")
+    typer.echo(f"Kunci induk dibuat dan disimpan di {env_file} (tidak ditampilkan). Cadangkan file itu di tempat aman.")
+
+
+# ---- user --------------------------------------------------------------------------
+@user_app.command("add")
+def user_add(ctx: typer.Context, name: str = typer.Argument(..., help="Nama pengguna baru.")) -> None:
+    """Tambah pengguna. Pengguna baru belum punya token Apify sampai menghubungkannya sendiri."""
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        db.create_user(name)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+    finally:
+        db.close()
+    typer.echo(f"Pengguna {name} dibuat. Hubungkan token Apify miliknya dengan: spi --user {name} apify connect")
+
+
+@user_app.command("list")
+def user_list(ctx: typer.Context) -> None:
+    """Daftar pengguna."""
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        for u in db.list_users():
+            marker = "  (dipilih)" if u["name"] == st.user_name else ""
+            typer.echo(f"{u['name']}{marker}")
+    finally:
+        db.close()
+
+
+# ---- apify -------------------------------------------------------------------------
+@apify_app.command("connect")
+def apify_connect(
+    ctx: typer.Context,
+    from_env: bool = typer.Option(False, "--from-env", help="Ambil token dari APIFY_TOKEN di .env alih-alih mengetiknya."),
+) -> None:
+    """Hubungkan atau ganti token Apify milik pengguna ini. Token divalidasi lalu disimpan terenkripsi."""
+    from spi.credentials import LEGACY_TOKEN_ENV, CredentialError, CredentialService
+    from spi.crypto import MasterKeyError
+    from spi.scrapers.base import ScraperError
+
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        user_id = st.user_id(db)
+        if from_env:
+            token = (st.env.get(LEGACY_TOKEN_ENV) or "").strip()
+            if not token:
+                typer.echo(f"{LEGACY_TOKEN_ENV} kosong di .env.", err=True)
+                raise typer.Exit(code=1)
+        else:
+            token = typer.prompt("Token Apify (tidak ditampilkan saat diketik)", hide_input=True)
+        try:
+            cred = CredentialService(db, st.env).connect(user_id, token)
+        except (MasterKeyError, CredentialError, ScraperError) as e:
+            typer.echo(f"Token tidak disimpan: {e}", err=True)
+            raise typer.Exit(code=1)
+    finally:
+        db.close()
+    typer.echo(
+        f"Token Apify terhubung untuk pengguna {st.user_name}: akun {cred['apify_username'] or cred['apify_user_id']} "
+        f"(token ...{cred['token_last4']}, tersimpan terenkripsi)."
+    )
+    if from_env:
+        typer.echo(f"Sekarang hapus baris {LEGACY_TOKEN_ENV} dari .env agar token tidak lagi tersimpan sebagai teks biasa.")
+
+
+@apify_app.command("disconnect")
+def apify_disconnect(ctx: typer.Context) -> None:
+    """Cabut token Apify milik pengguna ini dan hapus dari database."""
+    from spi.credentials import CredentialService
+
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        removed = CredentialService(db, st.env).disconnect(st.user_id(db))
+    finally:
+        db.close()
+    if removed:
+        typer.echo(f"Token Apify pengguna {st.user_name} dicabut dan dihapus dari database.")
+        typer.echo("Untuk mematikan token itu sepenuhnya, hapus juga di Apify Console -> Settings -> Integrations.")
+    else:
+        typer.echo(f"Pengguna {st.user_name} tidak punya token Apify yang tersimpan.")
+
+
+@apify_app.command("status")
+def apify_status(ctx: typer.Context) -> None:
+    """Akun Apify yang terhubung dan pemakaian bulan berjalan milik pengguna ini."""
+    from spi.credentials import CredentialError, CredentialService
+    from spi.crypto import DecryptError, MasterKeyError
+    from spi.scrapers.base import ScraperError
+
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        user_id = st.user_id(db)
+        svc = CredentialService(db, st.env)
+        cred = svc.status(user_id)
+        legacy = svc.uses_legacy_env_token(user_id)
+        typer.echo(f"Pengguna   : {st.user_name}")
+        if cred:
+            typer.echo(f"Akun Apify : {cred['apify_username'] or '?'} (id {cred['apify_user_id']})")
+            typer.echo(f"Token      : ...{cred['token_last4']}, terenkripsi, terhubung {cred['created_at'][:10]}")
+        elif legacy:
+            typer.echo("Token      : APIFY_TOKEN dari .env (cara lama, belum terenkripsi)")
+            typer.echo("             Pindahkan dengan: spi key init, lalu spi apify connect --from-env")
+        else:
+            typer.echo("Token      : belum terhubung. Hubungkan dengan: spi apify connect")
+            return
+        try:
+            usage = svc.usage(user_id)
+            typer.echo(
+                f"Pemakaian  : ${usage['used_usd']:.2f} dari ${usage['limit_usd']:.2f}, sisa ${usage['remaining_usd']:.2f} "
+                f"(siklus berakhir {usage['cycle_end'] or '-'})"
+            )
+        except (CredentialError, MasterKeyError, DecryptError, ScraperError) as e:
+            typer.echo(f"Pemakaian  : tidak bisa dibaca ({getattr(e, 'kind', type(e).__name__)}): {e}")
+        revoked = [h for h in svc.history(user_id) if h["status"] == "revoked"]
+        if revoked:
+            typer.echo(f"Riwayat    : {len(revoked)} token lama sudah dicabut dan dihapus")
+    finally:
+        db.close()
+
+
+# ---- jobs --------------------------------------------------------------------------
+@app.command()
+def jobs(
+    ctx: typer.Context,
+    run: Optional[str] = typer.Option(None, "--run", help="Tampilkan rincian satu run (RUN_ID)."),
+    limit: int = typer.Option(10, "--limit", help="Jumlah run dan eksekusi terbaru yang ditampilkan."),
+) -> None:
+    """Riwayat job dan eksekusi Actor Apify milik pengguna ini."""
+    st = _state(ctx)
+    db = st.open_db()
+    try:
+        user_id = st.user_id(db)
+        if run:
+            if db.run_owner(run) != user_id:
+                typer.echo(f"run {run} tidak ditemukan untuk pengguna ini", err=True)
+                raise typer.Exit(code=1)
+            typer.echo(f"Run {run} ({st.user_name})\n")
+            _echo_summary(db.run_summary(run))
+            executions = db.list_executions(user_id, run_id=run, limit=200)
+        else:
+            runs = db.list_runs(user_id, limit=limit)
+            if not runs:
+                typer.echo(f"Pengguna {st.user_name} belum punya job.")
+                return
+            typer.echo(f"Job milik {st.user_name}:")
+            typer.echo(f"{'Run':24} {'Mulai':16} {'Akun':>4} {'OK':>3} {'Gagal':>5} {'Post':>6} {'Komentar':>8}  Kredensial")
+            for r in runs:
+                cred = f"#{r['credential_id']}" if r["credential_id"] else "-"
+                typer.echo(
+                    f"{r['run_id']:24} {r['started_at'][:16]:16} {r['accounts']:>4} {r['ok']:>3} {r['not_ok']:>5} "
+                    f"{r['posts_found']:>6} {r['comments_found']:>8}  {cred}"
+                )
+            executions = db.list_executions(user_id, limit=limit)
+        if executions:
+            typer.echo("\nEksekusi Actor Apify (terbaru dulu):")
+            typer.echo(f"{'Waktu':16} {'Actor':36} {'Status':11} {'Hasil':>5} {'Biaya*':>8}  Error")
+            for e in executions:
+                cost = f"${e['usage_usd']:.4f}" if e["usage_usd"] is not None else "-"
+                items = e["items"] if e["items"] is not None else "-"
+                typer.echo(
+                    f"{e['started_at'][:16]:16} {e['actor'][:36]:36} {e['status']:11} {items:>5} {cost:>8}  {e['error_kind'] or ''}"
+                )
+            typer.echo(
+                "\n* Angka yang dilaporkan Apify saat run selesai; biaya per hasil bisa belum termasuk. "
+                "Pemakaian sebenarnya: spi apify status"
+            )
+    finally:
+        db.close()
 
 
 # ---- status ----------------------------------------------------------------------
@@ -280,9 +471,9 @@ def status(ctx: typer.Context) -> None:
         typer.echo(f"{'Akun':32} {'Post':>6} {'Komentar':>9}  Post terbaru")
         for row in stats:
             typer.echo(f"{row['platform'] + ':' + row['account']:32} {row['posts']:>6} {row['comments']:>9}  {row['latest_post'][:10]}")
-        run_id = db.latest_run_id()
+        run_id = db.latest_run_id(user_id=st.user_id(db))
         if run_id:
-            typer.echo(f"\nRun terakhir: {run_id}")
+            typer.echo(f"\nRun terakhir ({st.user_name}): {run_id}")
             _echo_summary(db.run_summary(run_id))
         reports = db.list_reports()
         if reports:

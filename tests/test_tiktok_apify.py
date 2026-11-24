@@ -4,6 +4,7 @@ import pytest
 
 from spi.config import ScrapeConfig, StorageConfig
 from spi.models import Post
+from spi.scrapers.apify_base import ApifyAccess
 from spi.scrapers.base import AccountNotFound, RateLimited, ScrapeBlocked, ScraperError
 from spi.scrapers.tiktok_apify import (
     COMMENTS_ACTOR,
@@ -11,6 +12,8 @@ from spi.scrapers.tiktok_apify import (
     TikTokApifyScraper,
     raise_for_apify_status,
 )
+
+from tests.apify_fakes import FakeApify
 
 NOW = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
 
@@ -60,11 +63,9 @@ class FakeRunner:
 
 def make_scraper(results, token="apify_token"):
     runner = FakeRunner(results)
-    settings = {
-        "scrape": ScrapeConfig(),
-        "storage": StorageConfig(),
-        "env": {"APIFY_TOKEN": token} if token else {},
-    }
+    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {}}
+    if token:
+        settings["apify"] = ApifyAccess(token=token, user_id=1, credential_id=1)
     return TikTokApifyScraper(settings, run_actor=runner), runner
 
 
@@ -163,9 +164,20 @@ def test_fetch_comments_for_unknown_post_runs_single_request():
 
 
 def test_missing_token_gives_actionable_error():
-    scraper, _ = make_scraper({POSTS_ACTOR: []}, token=None)
-    with pytest.raises(ScrapeBlocked, match="APIFY_TOKEN"):
+    scraper, runner = make_scraper({POSTS_ACTOR: []}, token=None)
+    with pytest.raises(ScrapeBlocked, match="spi apify connect"):
         list(scraper.fetch_posts("kompascom", None, 10))
+    assert runner.calls == []
+
+
+def test_token_in_env_is_ignored_without_the_job_owners_access():
+    """Adapter tidak boleh mengambil token sendiri dari .env: token hanya datang dari pemilik job."""
+    runner = FakeRunner({POSTS_ACTOR: [apify_post("a", 1)]})
+    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {"APIFY_TOKEN": "apify_api_ENV_0000"}}
+    scraper = TikTokApifyScraper(settings, run_actor=runner)
+    with pytest.raises(ScrapeBlocked):
+        list(scraper.fetch_posts("kompascom", None, 10))
+    assert runner.calls == []
 
 
 @pytest.mark.parametrize(
@@ -183,68 +195,26 @@ def test_raise_for_apify_status(status, body, expected):
         raise_for_apify_status(status, body)
 
 
-class FakeHttpResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
-        self.status_code = status_code
-        self._payload = payload if payload is not None else []
-        self.text = text or "[]"
+def test_http_flow_uses_only_the_job_owners_token():
+    fake = FakeApify()
+    fake.add_account("apify_api_SECRET123", "akun_andi")
+    fake.items[POSTS_ACTOR] = [apify_post("a", 1)]
+    records = []
+    settings = {
+        "scrape": ScrapeConfig(),
+        "storage": StorageConfig(),
+        "env": {},
+        "apify": ApifyAccess(token="apify_api_SECRET123", user_id=1, credential_id=5, on_execution=records.append),
+    }
+    scraper = TikTokApifyScraper(settings, http_post=fake.post, http_get=fake.get, retry_sleep=lambda s: None)
 
-    def json(self):
-        return self._payload
-
-
-def make_http_scraper(post_fn, token="apify_api_SECRET123"):
-    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {"APIFY_TOKEN": token}}
-    return TikTokApifyScraper(settings, http_post=post_fn, retry_sleep=lambda s: None)
-
-
-def test_http_sends_token_in_authorization_header_not_url():
-    calls = []
-
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs))
-        return FakeHttpResponse(payload=[apify_post("a", 1)])
-
-    scraper = make_http_scraper(fake_post)
     posts = list(scraper.fetch_posts("kompascom", None, 5))
 
     assert [p.post_id for p in posts] == ["a"]
-    url, kwargs = calls[0]
-    assert "apify_api_SECRET123" not in url
-    assert "token" not in kwargs.get("params", {})
-    assert kwargs["headers"]["Authorization"] == "Bearer apify_api_SECRET123"
-
-
-def test_connection_error_is_retried_then_reported_without_token():
-    import requests
-
-    attempts = []
-
-    def flaky_post(url, **kwargs):
-        attempts.append(1)
-        raise requests.ConnectionError("getaddrinfo failed for ...?token=apify_api_SECRET123")
-
-    scraper = make_http_scraper(flaky_post)
-    with pytest.raises(ScraperError) as exc:
-        list(scraper.fetch_posts("kompascom", None, 5))
-
-    assert len(attempts) == 3
-    assert "apify_api_SECRET123" not in str(exc.value)
-
-
-def test_connection_error_recovers_on_retry():
-    import requests
-
-    state = {"n": 0}
-
-    def post(url, **kwargs):
-        state["n"] += 1
-        if state["n"] == 1:
-            raise requests.ConnectionError("blip")
-        return FakeHttpResponse(payload=[apify_post("a", 1)])
-
-    scraper = make_http_scraper(post)
-    assert [p.post_id for p in scraper.fetch_posts("kompascom", None, 5)] == ["a"]
+    assert fake.tokens_used() == {"apify_api_SECRET123"}
+    assert all("apify_api_SECRET123" not in url for _, url, _ in fake.calls)
+    assert [r["actor"] for r in records] == [POSTS_ACTOR]
+    assert records[0]["status"] == "SUCCEEDED" and records[0]["items"] == 1
 
 
 def test_raise_for_apify_status_passes_on_success():

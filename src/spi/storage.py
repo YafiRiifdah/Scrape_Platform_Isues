@@ -1,8 +1,13 @@
-"""Penyimpanan SQLite untuk post, komentar, hasil analisis, dan checkpoint run."""
+"""Penyimpanan SQLite untuk post, komentar, hasil analisis, checkpoint run, pengguna, dan kredensial Apify.
+
+Semua fungsi yang menyentuh kredensial, run, dan eksekusi menerima `user_id` dan menyaring dengannya.
+Tidak ada fungsi yang mengambil kredensial tanpa menyebut pemiliknya.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -67,8 +72,50 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     error TEXT,
     started_at TEXT NOT NULL,
     finished_at TEXT,
+    user_id INTEGER,
+    credential_id INTEGER,
     PRIMARY KEY (run_id, account_key)
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+-- Token Apify milik pengguna, terenkripsi AES-256-GCM. Setelah dicabut, nonce dan ciphertext dihapus.
+CREATE TABLE IF NOT EXISTS apify_credentials (
+    credential_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id),
+    apify_user_id TEXT,
+    apify_username TEXT,
+    token_nonce BLOB,
+    token_ciphertext BLOB,
+    token_last4 TEXT NOT NULL,
+    key_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    created_at TEXT NOT NULL,
+    validated_at TEXT,
+    revoked_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_credentials_one_active ON apify_credentials (user_id) WHERE status = 'active';
+
+-- Satu baris per eksekusi Actor Apify, terikat ke pengguna dan kredensial yang dipakai.
+CREATE TABLE IF NOT EXISTS apify_executions (
+    execution_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users (user_id),
+    credential_id INTEGER REFERENCES apify_credentials (credential_id),
+    run_id TEXT,
+    actor TEXT NOT NULL,
+    apify_run_id TEXT,
+    status TEXT NOT NULL,
+    items INTEGER,
+    usage_usd REAL,
+    error_kind TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_executions_user ON apify_executions (user_id, execution_id);
 
 CREATE TABLE IF NOT EXISTS reports (
     report_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +129,12 @@ CREATE TABLE IF NOT EXISTS reports (
 """
 
 RETRYABLE_STATUSES = ("pending", "rate_limited")
+DEFAULT_USER = "default"
+_USER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
+_CREDENTIAL_PUBLIC_COLUMNS = (
+    "credential_id, user_id, apify_user_id, apify_username, token_last4, key_version, status, "
+    "created_at, validated_at, revoked_at"
+)
 
 
 def _now() -> str:
@@ -105,6 +158,7 @@ class Storage:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
 
     # ---- lifecycle -------------------------------------------------------
     def init_db(self) -> None:
@@ -117,6 +171,14 @@ class Storage:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(comments)")}
         if "replies_count" not in cols:
             self.conn.execute("ALTER TABLE comments ADD COLUMN replies_count INTEGER")
+        # Multi-user: run lama (sebelum ada pengguna) menjadi milik pengguna default.
+        run_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(scrape_runs)")}
+        for col in ("user_id", "credential_id"):
+            if col not in run_cols:
+                self.conn.execute(f"ALTER TABLE scrape_runs ADD COLUMN {col} INTEGER")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_user ON scrape_runs (user_id, started_at)")
+        default_id = self.ensure_user(DEFAULT_USER, commit=False)
+        self.conn.execute("UPDATE scrape_runs SET user_id = ? WHERE user_id IS NULL", (default_id,))
 
     def close(self) -> None:
         self.conn.close()
@@ -287,15 +349,46 @@ class Storage:
         return int(row["n"])
 
     # ---- scrape runs -----------------------------------------------------
-    def start_run(self, account_keys: list[str]) -> str:
+    def start_run(self, account_keys: list[str], user_id: Optional[int] = None, credential_id: Optional[int] = None) -> str:
+        """Buat run baru milik `user_id` (default: pengguna default) dan catat kredensial pemiliknya."""
+        owner = user_id if user_id is not None else self.default_user_id()
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         now = _now()
         self.conn.executemany(
-            "INSERT INTO scrape_runs (run_id, account_key, status, started_at) VALUES (?, ?, 'pending', ?)",
-            [(run_id, key, now) for key in account_keys],
+            "INSERT INTO scrape_runs (run_id, account_key, status, started_at, user_id, credential_id) "
+            "VALUES (?, ?, 'pending', ?, ?, ?)",
+            [(run_id, key, now, owner, credential_id) for key in account_keys],
         )
         self.conn.commit()
         return run_id
+
+    def run_owner(self, run_id: str) -> Optional[int]:
+        row = self.conn.execute("SELECT user_id FROM scrape_runs WHERE run_id = ? LIMIT 1", (run_id,)).fetchone()
+        return row["user_id"] if row else None
+
+    def set_run_credential(self, run_id: str, account_keys: list[str], credential_id: Optional[int]) -> None:
+        """Catat kredensial yang benar-benar dipakai untuk akun-akun ini (mis. saat --resume setelah ganti token)."""
+        self.conn.executemany(
+            "UPDATE scrape_runs SET credential_id = ? WHERE run_id = ? AND account_key = ?",
+            [(credential_id, run_id, key) for key in account_keys],
+        )
+        self.conn.commit()
+
+    def list_runs(self, user_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        """Riwayat run milik `user_id`, terbaru dulu."""
+        rows = self.conn.execute(
+            """
+            SELECT run_id, MIN(started_at) AS started_at, COUNT(*) AS accounts,
+                   SUM(status = 'ok') AS ok, SUM(status NOT IN ('ok', 'pending')) AS not_ok,
+                   SUM(status = 'pending') AS pending,
+                   SUM(posts_found) AS posts_found, SUM(comments_found) AS comments_found,
+                   MAX(credential_id) AS credential_id
+            FROM scrape_runs WHERE user_id = ?
+            GROUP BY run_id ORDER BY MIN(started_at) DESC, MAX(rowid) DESC LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        return [dict(r) for r in rows]
 
     def pending_accounts(self, run_id: str, include_retryable: bool = False) -> list[str]:
         statuses = RETRYABLE_STATUSES if include_retryable else ("pending",)
@@ -339,11 +432,129 @@ class Storage:
             for r in rows
         }
 
-    def latest_run_id(self) -> Optional[str]:
-        row = self.conn.execute(
-            "SELECT run_id FROM scrape_runs ORDER BY started_at DESC, rowid DESC LIMIT 1"
-        ).fetchone()
+    def latest_run_id(self, user_id: Optional[int] = None) -> Optional[str]:
+        sql, params = "SELECT run_id FROM scrape_runs", []
+        if user_id is not None:
+            sql, params = sql + " WHERE user_id = ?", [user_id]
+        row = self.conn.execute(sql + " ORDER BY started_at DESC, rowid DESC LIMIT 1", params).fetchone()
         return row["run_id"] if row else None
+
+    # ---- pengguna --------------------------------------------------------
+    def ensure_user(self, name: str, commit: bool = True) -> int:
+        row = self.conn.execute("SELECT user_id FROM users WHERE name = ?", (name,)).fetchone()
+        if row:
+            return int(row["user_id"])
+        cur = self.conn.execute("INSERT INTO users (name, created_at) VALUES (?, ?)", (name, _now()))
+        if commit:
+            self.conn.commit()
+        return int(cur.lastrowid)
+
+    def create_user(self, name: str) -> int:
+        if not _USER_NAME_RE.match(name or ""):
+            raise ValueError(
+                "nama pengguna hanya boleh huruf kecil, angka, titik, garis bawah, atau tanda hubung (maksimal 32 karakter)"
+            )
+        if self.get_user(name):
+            raise ValueError(f"pengguna {name!r} sudah ada")
+        return self.ensure_user(name)
+
+    def get_user(self, name: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM users ORDER BY user_id")]
+
+    def default_user_id(self) -> int:
+        return self.ensure_user(DEFAULT_USER)
+
+    # ---- kredensial Apify (selalu per pengguna) ---------------------------
+    def _revoke_active(self, user_id: int) -> int:
+        cur = self.conn.execute(
+            "UPDATE apify_credentials SET status = 'revoked', revoked_at = ?, token_nonce = NULL, token_ciphertext = NULL "
+            "WHERE user_id = ? AND status = 'active'",
+            (_now(), user_id),
+        )
+        return cur.rowcount
+
+    def replace_credential(
+        self,
+        user_id: int,
+        *,
+        apify_user_id: Optional[str],
+        apify_username: Optional[str],
+        nonce: bytes,
+        ciphertext: bytes,
+        last4: str,
+        key_version: int,
+    ) -> int:
+        """Simpan kredensial baru milik `user_id`. Kredensial aktif sebelumnya dicabut dan tokennya dihapus."""
+        now = _now()
+        with self.conn:  # satu transaksi: tidak pernah ada dua kredensial aktif
+            self._revoke_active(user_id)
+            cur = self.conn.execute(
+                """
+                INSERT INTO apify_credentials (user_id, apify_user_id, apify_username, token_nonce, token_ciphertext,
+                                               token_last4, key_version, status, created_at, validated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                """,
+                (user_id, apify_user_id, apify_username, nonce, ciphertext, last4, key_version, now, now),
+            )
+        return int(cur.lastrowid)
+
+    def active_credential(self, user_id: int) -> Optional[dict[str, Any]]:
+        """Kredensial aktif milik `user_id`, termasuk kolom terenkripsi. Hanya untuk lapisan layanan kredensial."""
+        row = self.conn.execute(
+            "SELECT * FROM apify_credentials WHERE user_id = ? AND status = 'active'", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def revoke_credentials(self, user_id: int) -> int:
+        with self.conn:
+            return self._revoke_active(user_id)
+
+    def list_credentials(self, user_id: int) -> list[dict[str, Any]]:
+        """Riwayat kredensial milik `user_id` tanpa kolom rahasia."""
+        rows = self.conn.execute(
+            f"SELECT {_CREDENTIAL_PUBLIC_COLUMNS} FROM apify_credentials WHERE user_id = ? ORDER BY credential_id DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    # ---- eksekusi Actor Apify ----------------------------------------------
+    def record_execution(
+        self,
+        *,
+        user_id: int,
+        credential_id: Optional[int],
+        run_id: Optional[str],
+        actor: str,
+        apify_run_id: Optional[str],
+        status: str,
+        items: Optional[int],
+        usage_usd: Optional[float],
+        error_kind: Optional[str],
+        started_at: str,
+        finished_at: Optional[str],
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO apify_executions (user_id, credential_id, run_id, actor, apify_run_id, status, items,
+                                          usage_usd, error_kind, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, credential_id, run_id, actor, apify_run_id, status, items, usage_usd, error_kind, started_at, finished_at),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_executions(self, user_id: int, run_id: Optional[str] = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Eksekusi Actor milik `user_id`, terbaru dulu."""
+        sql, params = "SELECT * FROM apify_executions WHERE user_id = ?", [user_id]
+        if run_id:
+            sql, params = sql + " AND run_id = ?", params + [run_id]
+        rows = self.conn.execute(sql + " ORDER BY execution_id DESC LIMIT ?", params + [limit])
+        return [dict(r) for r in rows]
 
     # ---- analysis --------------------------------------------------------
     def get_unanalyzed_posts(self, since: datetime) -> list[tuple[str, str]]:

@@ -90,7 +90,7 @@ class InstagramApifyScraper(ApifyBase):
 
     # ---- posts ----------------------------------------------------------------
     def fetch_posts(self, username: str, since: Optional[datetime], max_posts: int) -> Iterator[Post]:
-        self._token()
+        self._require_access()
         payload: dict[str, Any] = {
             "directUrls": [f"https://www.instagram.com/{username}/"],
             "resultsType": "posts",

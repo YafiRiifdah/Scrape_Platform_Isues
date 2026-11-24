@@ -4,6 +4,7 @@ import pytest
 
 from spi.config import ScrapeConfig, StorageConfig
 from spi.models import Post
+from spi.scrapers.apify_base import ApifyAccess
 from spi.scrapers.base import AccountNotFound, ScrapeBlocked, ScraperError
 from spi.scrapers.instagram_apify import (
     COMMENTS_ACTOR,
@@ -62,7 +63,9 @@ class FakeRunner:
 
 def make_scraper(results, token="apify_token"):
     runner = FakeRunner(results)
-    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {"APIFY_TOKEN": token} if token else {}}
+    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {}}
+    if token:
+        settings["apify"] = ApifyAccess(token=token, user_id=1, credential_id=1)
     return InstagramApifyScraper(settings, run_actor=runner), runner
 
 
@@ -131,7 +134,7 @@ def test_other_error_item_raises_scraper_error():
 
 def test_missing_token_gives_actionable_error():
     scraper, _ = make_scraper({POSTS_ACTOR: []}, token=None)
-    with pytest.raises(ScrapeBlocked, match="APIFY_TOKEN"):
+    with pytest.raises(ScrapeBlocked, match="spi apify connect"):
         list(scraper.fetch_posts("kompascom", None, 10))
 
 
@@ -173,25 +176,23 @@ def test_fetch_comments_for_unknown_post_runs_single_request():
 
 
 # ---- HTTP dipakai bersama dengan TikTok ---------------------------------------------
-def test_http_uses_bearer_header_and_shared_status_handling():
-    calls = []
+def test_http_flow_uses_only_the_job_owners_token():
+    from tests.apify_fakes import FakeApify
 
-    class Resp:
-        status_code = 200
-        text = "[]"
+    fake = FakeApify()
+    fake.add_account("apify_api_SECRET", "akun_andi")
+    fake.items[POSTS_ACTOR] = [ig_post("a")]
+    settings = {
+        "scrape": ScrapeConfig(),
+        "storage": StorageConfig(),
+        "env": {},
+        "apify": ApifyAccess(token="apify_api_SECRET", user_id=1, credential_id=1),
+    }
+    scraper = InstagramApifyScraper(settings, http_post=fake.post, http_get=fake.get, retry_sleep=lambda s: None)
 
-        def json(self):
-            return [ig_post("a")]
-
-    def fake_post(url, **kw):
-        calls.append((url, kw))
-        return Resp()
-
-    settings = {"scrape": ScrapeConfig(), "storage": StorageConfig(), "env": {"APIFY_TOKEN": "apify_api_SECRET"}}
-    scraper = InstagramApifyScraper(settings, http_post=fake_post, retry_sleep=lambda s: None)
     posts = list(scraper.fetch_posts("kompascom", None, 5))
 
     assert [p.post_id for p in posts] == ["a"]
-    url, kw = calls[0]
-    assert "apify~instagram-scraper" in url and "apify_api_SECRET" not in url
-    assert kw["headers"]["Authorization"] == "Bearer apify_api_SECRET"
+    assert fake.actor_runs_by("apify_api_SECRET") == ["apify~instagram-scraper"]
+    assert fake.tokens_used() == {"apify_api_SECRET"}
+    assert all("apify_api_SECRET" not in url for _, url, _ in fake.calls)

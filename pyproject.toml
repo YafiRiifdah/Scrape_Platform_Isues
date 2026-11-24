@@ -16,6 +16,8 @@ dependencies = [
     "typer==0.27.3",
     "pyyaml==6.0.3",
     "python-dotenv>=1.0",
+    "requests>=2.31",
+    "cryptography>=43",
 ]
 
 [project.optional-dependencies]

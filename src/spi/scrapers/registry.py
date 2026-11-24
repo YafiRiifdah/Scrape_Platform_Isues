@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any
+from typing import Any, Optional
 
 from spi.scrapers.base import BaseScraper
 
@@ -19,8 +19,16 @@ _ADAPTERS: dict[str, tuple[str, str, str]] = {
 }
 
 
+# Adapter yang memakai token Apify milik pemilik job.
+APIFY_ADAPTERS = frozenset({"instagram_apify", "tiktok_apify"})
+
+
 def available_adapters() -> list[str]:
     return list(_ADAPTERS)
+
+
+def uses_apify(adapter: str) -> bool:
+    return adapter in APIFY_ADAPTERS
 
 
 def platform_of(adapter: str) -> str:
@@ -42,14 +50,23 @@ def resolve(adapter: str) -> type[BaseScraper]:
     return getattr(module, class_name)
 
 
-def build(adapter: str, platform: str, cfg: Any, env: dict[str, str]) -> BaseScraper:
-    """Buat instance scraper. `cfg` adalah AppConfig, `env` variabel lingkungan (.env)."""
+def build(
+    adapter: str, platform: str, cfg: Any, env: dict[str, str], apify: Any = None, apify_error: Optional[str] = None
+) -> BaseScraper:
+    """Buat instance scraper. `cfg` adalah AppConfig, `env` variabel lingkungan (.env).
+
+    `apify` adalah ApifyAccess milik pemilik job dan hanya diteruskan ke adapter Apify; `apify_error`
+    menjelaskan mengapa akses itu tidak tersedia.
+    """
     expected = platform_of(adapter)
     if expected != platform:
         raise ValueError(f"adapter {adapter!r} untuk platform {expected}, bukan {platform}")
-    settings = {
+    settings: dict[str, Any] = {
         "scrape": cfg.scrape,
         "storage": cfg.storage,
         "env": env,
     }
+    if uses_apify(adapter):
+        settings["apify"] = apify
+        settings["apify_error"] = apify_error
     return resolve(adapter)(settings)

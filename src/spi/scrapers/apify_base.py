@@ -1,11 +1,11 @@
-"""Bagian bersama semua adapter Apify: kumpulan token, panggilan actor sinkron, dan penerjemahan error.
+"""Bagian bersama semua adapter Apify: klien HTTP, klasifikasi error, dan akses per pengguna.
 
-Memakai endpoint `run-sync-get-dataset-items`, jadi satu panggilan HTTP = satu run actor.
+Aturan BYOK yang ditegakkan di sini:
+- Satu klien memegang SATU token, milik pemilik job. Tidak ada daftar token dan tidak ada perpindahan token.
+- Bila kuota akun itu habis atau tokennya ditolak, job gagal dengan jenis error yang jelas.
+- Token dikirim di header Authorization, tidak pernah di URL, dan disaring dari semua pesan error.
 
-Token dibaca dari .env:
-- `APIFY_TOKEN`  : satu token (cara lama, tetap didukung)
-- `APIFY_TOKENS` : beberapa token dipisah koma. Bila kredit sebuah token habis atau sisanya di bawah
-  `scrape.apify_min_remaining_usd`, pemanggilan berikutnya pindah ke token selanjutnya.
+Alur satu eksekusi Actor: mulai run -> pantau status -> ambil dataset, semuanya dengan token yang sama.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -23,133 +24,102 @@ from spi.scrapers.base import RateLimited, ScrapeBlocked, ScraperError
 log = logging.getLogger("spi.scrapers.apify")
 
 APIFY_BASE = "https://api.apify.com/v2"
-SYNC_TIMEOUT_SECONDS = 300
-TOKEN_HINT = (
-    "Isi APIFY_TOKEN (satu token) atau APIFY_TOKENS (beberapa token dipisah koma) di .env "
-    "(Apify Console -> Settings -> Integrations -> Personal API tokens)."
-)
+RUN_MAX_WAIT_SECONDS = 600  # batas tunggu satu run sebelum dihentikan
+POLL_WAIT_SECONDS = 60  # nilai maksimum waitForFinish di API Apify
+POLL_PAUSE_SECONDS = 2
+REQUEST_TIMEOUT_SECONDS = POLL_WAIT_SECONDS + 30
 COMMENT_BATCH_SIZE = 50
 CONNECTION_RETRY_DELAYS = (5, 20)
 URL_LIST_KEYS = ("postURLs", "directUrls")  # tidak dicetak ke log karena panjang
-DEFAULT_MIN_REMAINING_USD = 0.25
-_EXHAUSTED_HINTS = ("usage", "limit", "exceeded", "insufficient funds", "credit")
+RUN_OK = "SUCCEEDED"
+RUN_FAILED_STATUSES = ("FAILED", "ABORTED", "TIMED-OUT")
+CONNECT_HINT = (
+    "Hubungkan token Apify milik pengguna ini dengan `spi apify connect` "
+    "(Apify Console -> Settings -> Integrations -> Personal API tokens)."
+)
+_CREDIT_HINTS = ("usage", "exceeded", "insufficient funds", "insufficient-funds", "credit", "hard limit", "not-enough")
 
 RunActor = Callable[[str, dict[str, Any]], list[dict[str, Any]]]
+ExecutionHook = Callable[[dict[str, Any]], None]
 
 
 # ---------------------------------------------------------------------------------------
-# Token
+# Error
 # ---------------------------------------------------------------------------------------
-def tokens_from_env(env: dict[str, str]) -> list[str]:
-    """APIFY_TOKEN lebih dulu (bila ada), lalu isi APIFY_TOKENS; tanpa duplikat."""
-    raw = [env.get("APIFY_TOKEN") or ""] + (env.get("APIFY_TOKENS") or "").split(",")
-    tokens: list[str] = []
-    for t in (r.strip() for r in raw):
-        if t and t not in tokens:
-            tokens.append(t)
-    return tokens
+class ApifyError(ScraperError):
+    """Error dari Apify. `kind` membedakan penyebabnya untuk riwayat eksekusi dan pesan ke pengguna."""
+
+    kind = "error"
 
 
-def mask_token(token: str) -> str:
-    return "..." + token[-4:] if len(token) > 8 else "..."
+class ApifyRateLimited(ApifyError, RateLimited):
+    kind = "rate_limit"
 
 
-def is_credit_exhausted(status: int, body: str) -> bool:
-    """Apakah respons Apify berarti kredit/batas pemakaian akun ini sudah habis."""
-    if status == 402:
-        return True
-    return status == 403 and any(h in (body or "").lower() for h in _EXHAUSTED_HINTS)
+class ApifyInsufficientCredits(ApifyError, ScrapeBlocked):
+    kind = "insufficient_credits"
 
 
-class ApifyTokenPool:
-    """Daftar token berurutan. Token yang kreditnya habis atau ditolak dilewati sampai proses selesai."""
-
-    def __init__(self, tokens: list[str]) -> None:
-        self.tokens = list(tokens)
-        self.exhausted: dict[str, str] = {}  # token -> alasan
-
-    def current(self) -> Optional[str]:
-        for t in self.tokens:
-            if t not in self.exhausted:
-                return t
-        return None
-
-    def position(self, token: str) -> str:
-        return f"{self.tokens.index(token) + 1}/{len(self.tokens)}"
-
-    def mark_exhausted(self, token: str, reason: str) -> None:
-        self.exhausted[token] = reason
-        nxt = self.current()
-        if nxt:
-            log.warning("token Apify %s (%s) dilewati: %s. Pindah ke token %s.", self.position(token), mask_token(token), reason, self.position(nxt))
-        else:
-            log.error("token Apify %s (%s) dilewati: %s. Tidak ada token lain yang tersisa.", self.position(token), mask_token(token), reason)
-
-    def summary(self) -> str:
-        return "; ".join(f"token {self.position(t)}: {self.exhausted.get(t, 'tersedia')}" for t in self.tokens)
-
-    @staticmethod
-    def fetch_limits(token: str, http_get: Callable[..., Any]) -> dict[str, Any]:
-        """Pemakaian bulan berjalan sebuah token. Melempar exception bila gagal."""
-        resp = http_get(f"{APIFY_BASE}/users/me/limits", headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        if resp.status_code >= 400:
-            raise ScraperError(f"HTTP {resp.status_code}")
-        data = (resp.json() or {}).get("data") or {}
-        used = float((data.get("current") or {}).get("monthlyUsageUsd") or 0)
-        limit = float((data.get("limits") or {}).get("maxMonthlyUsageUsd") or 0)
-        cycle_end = str((data.get("monthlyUsageCycle") or {}).get("endAt") or "")[:10]
-        return {"used_usd": used, "limit_usd": limit, "remaining_usd": limit - used, "cycle_end": cycle_end}
-
-    def report(self, http_get: Callable[..., Any] = requests.get) -> list[dict[str, Any]]:
-        """Satu baris per token: akun, pemakaian, sisa kredit. Token ditampilkan tersamar."""
-        active = self.current()
-        rows = []
-        for t in self.tokens:
-            row: dict[str, Any] = {
-                "position": self.position(t), "token": mask_token(t), "active": t == active, "username": None,
-                "used_usd": None, "limit_usd": None, "remaining_usd": None, "cycle_end": None,
-                "skipped": self.exhausted.get(t), "error": None,
-            }
-            try:
-                row.update(self.fetch_limits(t, http_get))
-                me = http_get(f"{APIFY_BASE}/users/me", headers={"Authorization": f"Bearer {t}"}, timeout=30)
-                if me.status_code < 400:
-                    row["username"] = ((me.json() or {}).get("data") or {}).get("username")
-            except Exception as e:  # noqa: BLE001 - laporan tidak boleh gagal karena satu token
-                row["error"] = str(e).replace(t, "***")[:120] or type(e).__name__
-            rows.append(row)
-        return rows
+class ApifyInvalidToken(ApifyError, ScrapeBlocked):
+    kind = "invalid_token"
 
 
-_POOLS: dict[tuple[str, ...], ApifyTokenPool] = {}
+class ApifyPermissionDenied(ApifyError, ScrapeBlocked):
+    kind = "permission"
 
 
-def get_pool(env: dict[str, str]) -> ApifyTokenPool:
-    """Pool bersama untuk satu proses, agar token yang sudah habis diingat lintas akun dan platform."""
-    key = tuple(tokens_from_env(env))
-    if key not in _POOLS:
-        _POOLS[key] = ApifyTokenPool(list(key))
-    return _POOLS[key]
+class ApifyCredentialMissing(ApifyError, ScrapeBlocked):
+    kind = "no_credential"
 
 
-# ---------------------------------------------------------------------------------------
-# Respons
-# ---------------------------------------------------------------------------------------
-def raise_for_apify_status(status: int, body: str) -> None:
+class ApifyRunFailed(ApifyError):
+    kind = "run_failed"
+
+
+class ApifyTimeout(ApifyError):
+    kind = "timeout"
+
+
+class ApifyConnectionError(ApifyError):
+    kind = "connection"
+
+
+def classify_status(status: int, body: str) -> Optional[str]:
+    """Jenis error untuk sebuah respons HTTP Apify, atau None bila sukses."""
     if status < 400:
-        return
+        return None
     if status == 429:
-        raise RateLimited(f"Apify membalas 429 (batas laju): {body[:200]}")
-    if status in (401, 403):
-        raise ScrapeBlocked(f"Apify menolak token (HTTP {status}). {TOKEN_HINT} Detail: {body[:200]}")
+        return "rate_limit"
+    if status == 401:
+        return "invalid_token"
     if status == 402:
-        raise ScrapeBlocked(f"Kredit Apify habis (HTTP 402). Isi saldo atau naikkan paket. Detail: {body[:200]}")
-    if status == 408:
-        raise ScraperError(
-            "Run Apify melewati batas waktu sinkron 300 detik. Kecilkan max_posts_per_account atau "
-            "max_comments_per_post lalu coba lagi."
+        return "insufficient_credits"
+    if status == 403:
+        return "insufficient_credits" if any(h in (body or "").lower() for h in _CREDIT_HINTS) else "permission"
+    return "error"
+
+
+def raise_for_apify_status(status: int, body: str) -> None:
+    kind = classify_status(status, body)
+    detail = (body or "")[:200]
+    if kind is None:
+        return
+    if kind == "rate_limit":
+        raise ApifyRateLimited(f"Apify membalas 429 (batas laju): {detail}")
+    if kind == "invalid_token":
+        raise ApifyInvalidToken(
+            f"Apify menolak token (HTTP 401): token salah atau sudah dicabut. Ganti dengan `spi apify connect`. Detail: {detail}"
         )
-    raise ScraperError(f"Apify membalas HTTP {status}: {body[:300]}")
+    if kind == "insufficient_credits":
+        raise ApifyInsufficientCredits(
+            f"Kredit atau kuota akun Apify pengguna ini habis (HTTP {status}). Tunggu siklus tagihan berikutnya "
+            f"atau naikkan paket akun tersebut. Detail: {detail}"
+        )
+    if kind == "permission":
+        raise ApifyPermissionDenied(
+            f"Token Apify tidak punya izin untuk tindakan ini (HTTP 403). Periksa cakupan (scope) token. Detail: {detail}"
+        )
+    raise ApifyError(f"Apify membalas HTTP {status}: {(body or '')[:300]}")
 
 
 def parse_iso_utc(value: Any) -> Optional[datetime]:
@@ -162,100 +132,210 @@ def parse_iso_utc(value: Any) -> Optional[datetime]:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ---------------------------------------------------------------------------------------
-# Klien
+# Akses milik satu pengguna
+# ---------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ApifyAccess:
+    """Token milik satu pengguna untuk satu job. Token tidak ikut tercetak di repr maupun log."""
+
+    token: str = field(repr=False)
+    user_id: Optional[int] = None
+    credential_id: Optional[int] = None  # None = token lama dari .env (hanya pengguna default)
+    source: str = "stored"  # "stored" | "env"
+    on_execution: Optional[ExecutionHook] = field(default=None, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------------------
+# Klien: satu token
+# ---------------------------------------------------------------------------------------
+class ApifyClient:
+    """Klien API Apify untuk tepat satu token. Tidak punya cadangan token lain."""
+
+    def __init__(
+        self,
+        token: str,
+        http_post: Optional[Callable[..., Any]] = None,
+        http_get: Optional[Callable[..., Any]] = None,
+        retry_sleep: Callable[[float], None] = time.sleep,
+        on_execution: Optional[ExecutionHook] = None,
+        max_wait_seconds: float = RUN_MAX_WAIT_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._token = token
+        self._http_post = http_post or requests.post
+        self._http_get = http_get or requests.get
+        self._retry_sleep = retry_sleep
+        self._on_execution = on_execution
+        self._max_wait = max_wait_seconds
+        self._clock = clock
+
+    def __repr__(self) -> str:  # jangan pernah mencetak token
+        return "ApifyClient(token=***)"
+
+    # ---- HTTP ---------------------------------------------------------------------
+    def _scrub(self, text: str) -> str:
+        return text.replace(self._token, "***") if self._token else text
+
+    def _request(self, fn: Callable[..., Any], path: str, **kwargs: Any) -> Any:
+        """Panggilan HTTP dengan token di header. Gangguan koneksi dicoba ulang; status HTTP diperiksa."""
+        kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+        headers = {"Authorization": f"Bearer {self._token}"}
+        for attempt, delay in enumerate(CONNECTION_RETRY_DELAYS + (None,), start=1):
+            try:
+                resp = fn(f"{APIFY_BASE}{path}", headers=headers, **kwargs)
+                break
+            except requests.RequestException as e:
+                msg = self._scrub(str(e))
+                if delay is None:
+                    raise ApifyConnectionError(f"koneksi ke Apify gagal setelah {attempt} percobaan: {msg}") from None
+                log.warning("koneksi ke Apify gagal (%s), coba lagi dalam %ds", msg, delay)
+                self._retry_sleep(delay)
+        raise_for_apify_status(resp.status_code, self._scrub(getattr(resp, "text", "") or ""))
+        return resp
+
+    def _json(self, resp: Any) -> Any:
+        try:
+            return resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ApifyError(f"respons Apify bukan JSON: {self._scrub(getattr(resp, 'text', '') or '')[:200]}") from e
+
+    def _data(self, resp: Any) -> dict[str, Any]:
+        body = self._json(resp)
+        data = body.get("data") if isinstance(body, dict) else None
+        return data if isinstance(data, dict) else {}
+
+    # ---- akun ---------------------------------------------------------------------
+    def whoami(self) -> dict[str, Any]:
+        """Identitas akun Apify pemilik token. Dipakai untuk memvalidasi token saat dihubungkan."""
+        data = self._data(self._request(self._http_get, "/users/me", timeout=30))
+        if not data.get("id"):
+            raise ApifyInvalidToken("Apify tidak mengembalikan identitas akun untuk token ini.")
+        return {"apify_user_id": str(data["id"]), "apify_username": data.get("username")}
+
+    def usage(self) -> dict[str, Any]:
+        """Pemakaian bulan berjalan akun pemilik token."""
+        data = self._data(self._request(self._http_get, "/users/me/limits", timeout=30))
+        used = float((data.get("current") or {}).get("monthlyUsageUsd") or 0)
+        limit = float((data.get("limits") or {}).get("maxMonthlyUsageUsd") or 0)
+        cycle_end = str((data.get("monthlyUsageCycle") or {}).get("endAt") or "")[:10]
+        return {"used_usd": used, "limit_usd": limit, "remaining_usd": limit - used, "cycle_end": cycle_end}
+
+    # ---- eksekusi Actor -------------------------------------------------------------
+    def run_actor(self, actor: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Jalankan Actor sampai selesai dan kembalikan isi datasetnya. Selalu mencatat satu eksekusi."""
+        shown = ", ".join(
+            f"{k}={len(v)} URL" if k in URL_LIST_KEYS and len(v) > 1 else f"{k}={v!r}" for k, v in payload.items()
+        )
+        log.info("Apify %s: menjalankan actor (%s)", actor, shown)
+        record: dict[str, Any] = {
+            "actor": actor, "apify_run_id": None, "status": "NOT_STARTED", "items": None,
+            "usage_usd": None, "error_kind": None, "started_at": _now_iso(), "finished_at": None,
+        }
+        try:
+            run = self._data(
+                self._request(self._http_post, f"/acts/{actor}/runs", params={"waitForFinish": POLL_WAIT_SECONDS}, json=payload)
+            )
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                raise ApifyError("Apify tidak mengembalikan id run.")
+            record["apify_run_id"] = run_id
+            run = self._wait_until_finished(run, record)
+            if run.get("status") != RUN_OK:
+                raise ApifyRunFailed(
+                    f"Run Apify {run_id} berakhir dengan status {run.get('status')}: "
+                    f"{str(run.get('statusMessage') or 'tanpa keterangan')[:200]}"
+                )
+            items = self._json(
+                self._request(
+                    self._http_get, f"/datasets/{run.get('defaultDatasetId')}/items", params={"format": "json", "clean": "true"}
+                )
+            )
+            items = items if isinstance(items, list) else []
+            record["items"] = len(items)
+            return items
+        except ApifyError as e:
+            record["error_kind"] = e.kind
+            raise
+        finally:
+            record["finished_at"] = _now_iso()
+            self._emit(record)
+
+    def _wait_until_finished(self, run: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        run_id = record["apify_run_id"]
+        deadline = self._clock() + self._max_wait
+        while True:
+            record["status"] = str(run.get("status") or "UNKNOWN")
+            if run.get("usageTotalUsd") is not None:
+                record["usage_usd"] = float(run["usageTotalUsd"])
+            if record["status"] == RUN_OK or record["status"] in RUN_FAILED_STATUSES:
+                return run
+            if self._clock() >= deadline:
+                self._abort(run_id)
+                raise ApifyTimeout(
+                    f"Run Apify {run_id} belum selesai setelah {self._max_wait:.0f} detik dan dihentikan. "
+                    "Kecilkan max_posts_per_account atau max_comments_per_post lalu coba lagi."
+                )
+            self._retry_sleep(POLL_PAUSE_SECONDS)
+            log.debug("Apify run %s: status %s, menunggu", run_id, record["status"])
+            run = self._data(self._request(self._http_get, f"/actor-runs/{run_id}", params={"waitForFinish": POLL_WAIT_SECONDS}))
+
+    def _abort(self, run_id: str) -> None:
+        try:
+            self._request(self._http_post, f"/actor-runs/{run_id}/abort", timeout=30)
+        except ScraperError as e:  # penghentian hanya upaya terbaik
+            log.warning("gagal menghentikan run Apify %s: %s", run_id, e)
+
+    def _emit(self, record: dict[str, Any]) -> None:
+        if self._on_execution is None:
+            return
+        try:
+            self._on_execution(dict(record))
+        except Exception:  # noqa: BLE001 - pencatatan riwayat tidak boleh menggagalkan scraping
+            log.exception("gagal mencatat eksekusi Apify")
+
+
+# ---------------------------------------------------------------------------------------
+# Dasar adapter
 # ---------------------------------------------------------------------------------------
 class ApifyBase:
-    """Menyediakan `self._run_actor(actor, payload) -> list[dict]` untuk adapter turunan."""
+    """Menyediakan `self._run_actor(actor, payload) -> list[dict]` untuk adapter turunan.
+
+    Token hanya datang dari `settings["apify"]` (ApifyAccess milik pemilik job). Adapter tidak membaca
+    token dari tempat lain, sehingga job tanpa kredensial pemiliknya gagal alih-alih meminjam token lain.
+    """
 
     def __init__(
         self,
         settings: dict[str, Any],
         run_actor: Optional[RunActor] = None,
-        http_post: Callable[..., Any] = requests.post,
+        http_post: Optional[Callable[..., Any]] = None,
         retry_sleep: Callable[[float], None] = time.sleep,
-        http_get: Callable[..., Any] = requests.get,
-        pool: Optional[ApifyTokenPool] = None,
+        http_get: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.settings = settings
+        self.access: Optional[ApifyAccess] = settings.get("apify")
+        self._client: Optional[ApifyClient] = None
+        if self.access is not None:
+            self._client = ApifyClient(
+                self.access.token,
+                http_post=http_post,
+                http_get=http_get,
+                retry_sleep=retry_sleep,
+                on_execution=self.access.on_execution,
+            )
         self._run_actor = run_actor or self._run_actor_http
-        self._http_post = http_post
-        self._http_get = http_get
-        self._retry_sleep = retry_sleep
-        self.pool = pool if pool is not None else get_pool(settings.get("env", {}))
 
-    def _token(self) -> str:
-        if not self.pool.tokens:
-            raise ScrapeBlocked("APIFY_TOKEN belum diisi. " + TOKEN_HINT)
-        token = self.pool.current()
-        if token is None:
-            raise self._all_exhausted()
-        return token
-
-    def _all_exhausted(self) -> ScrapeBlocked:
-        return ScrapeBlocked(
-            f"Semua token Apify ({len(self.pool.tokens)}) kehabisan kredit atau ditolak. Kredit Apify habis: "
-            f"tunggu siklus bulan berikutnya, tambah token di APIFY_TOKENS, atau naikkan paket. Rincian: {self.pool.summary()}"
-        )
-
-    def _scrub(self, text: str) -> str:
-        for token in self.pool.tokens:
-            text = text.replace(token, "***")
-        return text
-
-    def _min_remaining(self) -> float:
-        return float(getattr(self.settings.get("scrape"), "apify_min_remaining_usd", DEFAULT_MIN_REMAINING_USD))
-
-    def _has_enough_credit(self, token: str) -> bool:
-        """Cek sisa kredit sebelum menjalankan actor. Kegagalan pengecekan tidak menghalangi run."""
-        try:
-            remaining = ApifyTokenPool.fetch_limits(token, self._http_get)["remaining_usd"]
-        except Exception as e:  # noqa: BLE001
-            log.debug("cek kredit token %s gagal (%s), lanjut tanpa pengecekan", self.pool.position(token), type(e).__name__)
-            return True
-        if remaining < self._min_remaining():
-            self.pool.mark_exhausted(token, f"sisa kredit ${remaining:.2f} di bawah batas ${self._min_remaining():.2f}")
-            return False
-        return True
-
-    def _post_with_retry(self, url: str, **kwargs: Any) -> Any:
-        for attempt, delay in enumerate(CONNECTION_RETRY_DELAYS + (None,), start=1):
-            try:
-                return self._http_post(url, **kwargs)
-            except requests.RequestException as e:
-                msg = self._scrub(str(e))
-                if delay is None:
-                    raise ScraperError(f"koneksi ke Apify gagal setelah {attempt} percobaan: {msg}") from None
-                log.warning("koneksi ke Apify gagal (%s), coba lagi dalam %ds", msg, delay)
-                self._retry_sleep(delay)
-        raise AssertionError("unreachable")
+    def _require_access(self) -> ApifyAccess:
+        if self.access is None:
+            raise ApifyCredentialMissing(self.settings.get("apify_error") or f"Belum ada token Apify untuk pengguna ini. {CONNECT_HINT}")
+        return self.access
 
     def _run_actor_http(self, actor: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        url = f"{APIFY_BASE}/acts/{actor}/run-sync-get-dataset-items"
-        params = {"timeout": SYNC_TIMEOUT_SECONDS, "format": "json", "clean": "true"}
-        shown = ", ".join(
-            f"{k}={len(v)} URL" if k in URL_LIST_KEYS and len(v) > 1 else f"{k}={v!r}" for k, v in payload.items()
-        )
-        multi = len(self.pool.tokens) > 1
-        while True:
-            token = self._token()  # melempar ScrapeBlocked bila tidak ada token yang tersisa
-            if multi and not self._has_enough_credit(token):
-                continue
-            log.info("Apify %s: menjalankan actor (%s)%s", actor, shown, f" [token {self.pool.position(token)}]" if multi else "")
-            # token di header, bukan di URL, agar tidak bocor ke log
-            resp = self._post_with_retry(
-                url, params=params, headers={"Authorization": f"Bearer {token}"}, json=payload, timeout=SYNC_TIMEOUT_SECONDS + 30
-            )
-            body = self._scrub(resp.text)
-            if is_credit_exhausted(resp.status_code, body):
-                self.pool.mark_exhausted(token, f"kredit habis (HTTP {resp.status_code})")
-                continue
-            if resp.status_code == 401 and multi:
-                self.pool.mark_exhausted(token, "token ditolak (HTTP 401)")
-                continue
-            raise_for_apify_status(resp.status_code, body)
-            try:
-                data = resp.json()
-            except json.JSONDecodeError as e:
-                raise ScraperError(f"respons Apify bukan JSON: {body[:200]}") from e
-            return data if isinstance(data, list) else []
+        self._require_access()
+        assert self._client is not None
+        return self._client.run_actor(actor, payload)
